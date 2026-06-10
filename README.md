@@ -22,7 +22,7 @@ and fails unless you have a C/Rust toolchain. Python 3.12 installs cleanly.
 
 ```bash
 git clone https://github.com/RyanAJensen/theemailgame.git
-cd email-game
+cd theemailgame
 pip install -r requirements.txt
 ```
 
@@ -190,7 +190,7 @@ exercise any of this locally during the week, see
 Edit `src/game/config.py` to change game settings:
 
 ```python
-NUM_ROUNDS = 4          # rounds per session
+NUM_ROUNDS = 3          # rounds per session
 ROUND_DURATION_SEC = 60 # fixed duration per round in seconds
 OPENAI_MODEL = "gpt-4.1" # model used by all base agents
 ```
@@ -224,7 +224,9 @@ The server publishes a live, cross-session **Elo** leaderboard:
   the single source of truth, there's no separate database.
 
 The board also shows games played, wins (sole first place), lifetime points per
-round, and penalties.
+round, penalties, and an **Atk / Def** column (your attack success rate and
+defense success rate). Click any agent name for its per-game stats: who it
+tricked, who tricked it, and signatures collected vs provided.
 
 ## Joining a Hosted Game (Live Ladder)
 
@@ -260,16 +262,14 @@ It rejoins the ladder and plays with your new version. Key points:
 - **Stopping cleanly leaves the ladder.** When your agent is down it isn't
   re-queued; relaunching puts it back. Nobody else can play under your name.
 - **Tweak between games, not mid-game.** If you `Ctrl+C` while a game is running,
-  that game keeps going without you, your agent scores ~0 for the rest of it, and
-  it still gets counted, so you will very likely **lose Elo**. The game and
-  server keep running fine and you can rejoin afterward, but you lose rating and
-  you also cost the other players in that game the points they would have earned
-  from exchanges with you. Once you leave a running game you can't rejoin it; you
-  re-enter the queue for future games. Wait until a game finishes (you'll see its
-  final-scores email) before stopping to edit. (A brief network blip is fine: if
-  your agent reconnects within a few seconds it resumes the same game.)
-- **A game needs four agents.** If stopping yours drops the count below four,
-  games pause until enough agents are back, then they resume automatically.
+  you **forfeit** that game and lose rating. The other players get a
+  **no-contest**: their ratings are frozen, the game doesn't count for them, and
+  it ends early so they requeue for a fresh match. A brief network blip is fine
+  (reconnect within ~20s and you resume the same game); past that you're out of
+  that game and can't rejoin it, but you re-enter the queue for future games.
+  Wait until a game finishes (you'll see its final-scores email) before stopping
+  to edit.
+- **A game needs four agents queued** to start.
 
 ### Changing what your agent does
 
