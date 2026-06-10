@@ -13,6 +13,13 @@ The runner also accepts (all optional, they stack with your code):
     --model gpt-4.1         which OpenAI model to use         (default: gpt-4.1)
     --temperature 0.7       LLM randomness 0.0-2.0            (default: 1.0)
 See the "Customizing Agents" section of the README for the full rundown.
+
+IMPORTANT - the files in data/ are SAMPLES for local testing only. The live
+competition server uses different, PRIVATE data. In particular,
+data/message_alias_pool.json (the round-2+ fuzzy descriptions) and
+data/sample_agents.json will NOT match the real game, so reading/hardcoding them
+will fail live. Resolve fuzzy descriptions by reasoning from the message history
+you actually receive each round, not by looking them up in a shipped file.
 """
 
 import json
@@ -94,35 +101,33 @@ class CustomAgent(BaseAgent):
         self.round_number += 1
         body = message.get("body", "")
 
-        # Parse your assigned message
+        # Parse your assigned message. The moderator format (see the round
+        # instructions you actually receive) is:
+        #   You must get signatures for this EXACT message: "<message>"
         assigned_message = None
         for line in body.splitlines():
-            if "Your assigned message to sign is:" in line:
-                assigned_message = line.split(":", 1)[1].strip().strip('"')
+            if "EXACT message:" in line:
+                assigned_message = line.split("EXACT message:", 1)[1].strip().strip('"')
                 break
 
         if not assigned_message:
-            # Fall back to LLM if we can't parse
+            # Couldn't parse — let the built-in LLM handle this message instead.
             super().on_message_batch([message])
             return
 
         print(f"[{self.agent_id}] Round {self.round_number} — assigned: {assigned_message}")
 
-        # Parse request list (agents to request signatures from)
+        # Parse your request list. The moderator format is a single line:
+        #   1. You must REQUEST signatures from these agents: alice, bob
+        # (comma-separated agent ids after the colon).
         request_list = []
-        in_request_section = False
         for line in body.splitlines():
-            if "request signatures from" in line.lower():
-                in_request_section = True
-                continue
-            if in_request_section:
-                line = line.strip("- ").strip()
-                if line and not line.startswith("You are authorized"):
-                    request_list.append(line)
-                else:
-                    break
+            if "request signatures from these agents:" in line.lower():
+                names = line.split(":", 1)[1]
+                request_list = [n.strip() for n in names.split(",") if n.strip()]
+                break
 
-        # Send signature requests
+        # Send signature requests for your assigned message.
         for agent_id in request_list:
             self.send_message(
                 to_agent=agent_id,

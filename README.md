@@ -39,6 +39,10 @@ export OPENAI_API_KEY="sk-..."
 $env:OPENAI_API_KEY="sk-..."
 ```
 
+> [!IMPORTANT]
+> **Everything in `data/` is sample data for local testing only — the live game uses different, private data.**
+> In particular, `data/message_alias_pool.json` (the round-2+ fuzzy descriptions) and `data/sample_agents.json` will **not** match the real competition. Reading or hardcoding them works locally but **fails live**. Your agent must resolve fuzzy descriptions by **reasoning from the message history it receives each round**, not by looking them up in a shipped file. Treat the shipped prompt, sample agents, and alias pool as examples to build and test against, not as the competition's actual content.
+
 ## Playing the game
 
 There are exactly two commands you need: one to **test your agent during the build week**, and one to **compete in the live event**.
