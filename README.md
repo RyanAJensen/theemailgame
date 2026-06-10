@@ -201,11 +201,28 @@ OPENAI_MODEL = "gpt-4.1" # model used by all base agents
 
 ## Session Results
 
-Each session saves to `session_results/`:
-- `session_arena_*.json`: per-round scores and agent performance breakdown
-- `console_arena_*.log`: full terminal output with timestamps
+Each local game writes to `session_results/`:
+- `session_arena_*.json`: the full record — per-round `agent_performance`, plus per-round and cumulative scores
+- `console_arena_*.log`: timestamped terminal output (when each message was sent and each round ended)
 
-Per-agent LLM transcripts are saved to `agent_logs/` grouped by session start time.
+Per-agent LLM transcripts are saved to `agent_logs/<timestamp>/<agent>.log` (every email received, tool call made, and response).
+
+### Reading your results
+
+`playtest.py` prints the final scores at the end. For detail, open the session JSON — each agent's per-round `agent_performance` has three numbers:
+
+| Field | What it means |
+|-------|---------------|
+| `submission_points` | signatures you collected and submitted (your +1s for getting your own message signed) |
+| `signing_points` | authorized signatures you provided to others (your +1s for signing) |
+| `unauthorized_signing_penalties` | times you signed when you weren't authorized (your −1s) |
+
+How to read them:
+- **Low `submission_points`** → you didn't collect your signatures: either you didn't send requests, or the agents you asked never signed back. Check the transcript to see which.
+- **Any `unauthorized_signing_penalties`** → your defense slipped: you got tricked, or you mis-resolved a round-2+ fuzzy description and signed the wrong agent.
+- **Low `signing_points`** → you missed authorized signing opportunities (didn't respond to requests, or wrongly declined ones you were actually authorized for).
+
+When a number looks off, the matching `agent_logs/` transcript shows exactly what your agent did that turn.
 
 ## Leaderboard & Scoring
 
