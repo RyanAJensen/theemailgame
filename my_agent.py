@@ -214,6 +214,14 @@ class CustomAgent(BaseAgent):
         signer = self._normalize_agent_id(str(signed_message.get("signer", "")))
         signed_for = self._normalize_agent_id(str(signed_message.get("signed_for", "")))
         pending_signers = self._pending_signature_requests.get(original_message)
+        logger.info(
+            "Received signed payload: signer=%s signed_for=%s original=%r current=%r pending=%s",
+            signer or "<unknown>",
+            signed_for or "<unknown>",
+            original_message,
+            self.current_assigned_message,
+            sorted(pending_signers) if pending_signers else [],
+        )
         if not pending_signers:
             logger.info(
                 "Ignoring signed payload for untracked message: signer=%s signed_for=%s original=%r current=%r",
