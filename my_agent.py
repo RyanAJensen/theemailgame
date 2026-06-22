@@ -208,7 +208,8 @@ class CustomAgent(BaseAgent):
 
         signed_message = self._extract_signed_message(body)
         if not signed_message:
-            return True
+            logger.info("Signed marker present but payload could not be parsed; falling back to BaseAgent")
+            return False
 
         original_message = str(signed_message.get("original_message", ""))
         signer = self._normalize_agent_id(str(signed_message.get("signer", "")))
@@ -230,17 +231,17 @@ class CustomAgent(BaseAgent):
                 original_message,
                 self.current_assigned_message,
             )
-            return True
+            return False
         if signer not in pending_signers:
             logger.warning(
                 "Ignoring signature from unexpected signer %s for message %r",
                 signer or "<unknown>",
                 original_message,
             )
-            return True
+            return False
         if signed_for and signed_for != self.agent_id:
             logger.warning("Ignoring signature for unexpected recipient %s", signed_for)
-            return True
+            return False
 
         key = (
             signer,
