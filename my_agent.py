@@ -80,6 +80,7 @@ class CustomAgent(BaseAgent):
         self._processed_moderator_keys: Set[Tuple[int, str, Tuple[str, ...], Tuple[str, ...], Tuple[str, ...]]] = set()
         self._pending_signature_requests: Dict[str, Set[str]] = {}
         self._sender_history: Dict[str, List[str]] = {}
+        self._mailbox_signature_scan_ids: Set[str] = set()
 
     def on_new_game(self) -> None:
         self._reset_game_state()
@@ -118,6 +119,8 @@ class CustomAgent(BaseAgent):
                 continue
 
             fallback.append(message)
+
+        self._scan_mailbox_for_signed_messages()
 
         if fallback:
             super().on_message_batch(fallback)
@@ -311,6 +314,36 @@ class CustomAgent(BaseAgent):
         self._declined_request_keys.add(request_key)
         logger.info("Declined request from %s", requester)
         return True
+
+    def _scan_mailbox_for_signed_messages(self) -> None:
+        token = getattr(self, "_jwt_token", None)
+        if not token:
+            return
+
+        try:
+            import requests
+            from urllib.parse import quote
+
+            url = f"{self.email_server_url}/get_messages/{quote(self.agent_id)}?token={quote(token)}"
+            response = requests.get(url, timeout=5)
+            response.raise_for_status()
+            messages = response.json().get("messages", [])
+        except Exception as e:
+            logger.debug("Mailbox scan skipped: %s", e)
+            return
+
+        for message in messages:
+            message_id = str(message.get("message_id") or "")
+            if not message_id or message_id in self._mailbox_signature_scan_ids:
+                continue
+
+            body = str(message.get("body", "") or "")
+            subject = str(message.get("subject", "") or "")
+            if "signed" not in subject.lower() and self._extract_signed_message(body) is None:
+                continue
+
+            self._mailbox_signature_scan_ids.add(message_id)
+            self._maybe_submit_received_signature(message)
 
     def _refresh_authorization_resolution(self) -> None:
         resolved: List[str] = []
