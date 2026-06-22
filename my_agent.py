@@ -194,8 +194,8 @@ class CustomAgent(BaseAgent):
             # TODO(strategy): learn which request targets are fastest / most reliable in live ladders.
             self.send_message(
                 to_agent=agent_id,
-                subject=f"Signature Request - Round {self.current_round}",
-                body=f"Hi {agent_id}, please sign this message for me: {self.current_assigned_message}",
+                subject="Signature Request",
+                body=f"Please sign this message for me: {self.current_assigned_message}",
             )
             logger.info("Sent signature request to %s", agent_id)
 
@@ -213,12 +213,22 @@ class CustomAgent(BaseAgent):
         original_message = str(signed_message.get("original_message", ""))
         signer = self._normalize_agent_id(str(signed_message.get("signer", "")))
         signed_for = self._normalize_agent_id(str(signed_message.get("signed_for", "")))
-        expected_signers = self._pending_signature_requests.get(original_message)
-        if not expected_signers:
-            logger.info("Ignoring signed payload for unrequested message")
+        pending_signers = self._pending_signature_requests.get(original_message)
+        if not pending_signers:
+            logger.info(
+                "Ignoring signed payload for untracked message: signer=%s signed_for=%s original=%r current=%r",
+                signer or "<unknown>",
+                signed_for or "<unknown>",
+                original_message,
+                self.current_assigned_message,
+            )
             return True
-        if signer not in expected_signers:
-            logger.warning("Ignoring signature from unexpected signer %s", signer or "<unknown>")
+        if signer not in pending_signers:
+            logger.warning(
+                "Ignoring signature from unexpected signer %s for message %r",
+                signer or "<unknown>",
+                original_message,
+            )
             return True
         if signed_for and signed_for != self.agent_id:
             logger.warning("Ignoring signature for unexpected recipient %s", signed_for)
@@ -233,11 +243,17 @@ class CustomAgent(BaseAgent):
             logger.info("Duplicate signed payload ignored: %s -> %s", key[0], key[1])
             return True
 
+        logger.info(
+            "Submitting signed payload from %s for %s (message=%r)",
+            key[0] or "<unknown>",
+            key[1] or "<unknown>",
+            original_message,
+        )
         result = self.submit_signature(signed_message)
         if result.get("success"):
             self._submitted_signature_keys.add(key)
-            expected_signers.discard(signer)
-            if not expected_signers:
+            pending_signers.discard(signer)
+            if not pending_signers:
                 self._pending_signature_requests.pop(original_message, None)
             logger.info("Submitted received signature from %s", key[0])
         else:
@@ -420,22 +436,44 @@ class CustomAgent(BaseAgent):
 
     @staticmethod
     def _extract_signed_message(body: str) -> Optional[Dict]:
-        marker_index = body.find(_SIGNED_MARKER)
-        if marker_index < 0:
+        text = body.strip()
+        if not text:
             return None
 
-        payload = body[marker_index + len(_SIGNED_MARKER):].strip()
-        start = payload.find("{")
-        if start < 0:
+        required_keys = {"original_message", "signature", "signer", "signed_for"}
+        decoder = json.JSONDecoder()
+
+        def _extract_from_fragment(fragment: str) -> Optional[Dict]:
+            start = fragment.find("{")
+            if start < 0:
+                return None
+            try:
+                signed_message, _ = decoder.raw_decode(fragment[start:])
+            except json.JSONDecodeError:
+                return None
+            if not isinstance(signed_message, dict):
+                return None
+            if required_keys.issubset(signed_message.keys()):
+                return signed_message
+            for nested_key in ("signed_message", "payload", "message", "signature"):
+                nested = signed_message.get(nested_key)
+                if isinstance(nested, dict) and required_keys.issubset(nested.keys()):
+                    return nested
             return None
 
-        try:
-            signed_message, _ = json.JSONDecoder().raw_decode(payload[start:])
-        except json.JSONDecodeError:
-            return None
+        marker_pattern = re.compile(r"SIGNED_MESSAGE_JSON\s*[:=]\s*", re.IGNORECASE)
+        search_starts = [m.end() for m in marker_pattern.finditer(text)]
+        search_starts.append(0)
 
-        if isinstance(signed_message, dict):
-            return signed_message
+        seen = set()
+        for start in search_starts:
+            if start in seen:
+                continue
+            seen.add(start)
+            extracted = _extract_from_fragment(text[start:])
+            if extracted is not None:
+                return extracted
+
         return None
 
     @staticmethod

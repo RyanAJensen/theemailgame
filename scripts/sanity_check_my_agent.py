@@ -85,7 +85,14 @@ def request_message(sender: str, body: str):
     }
 
 
-def signed_payload_message(sender: str, original_message: str, signed_for: str = AGENT_ID):
+def signed_payload_message(
+    sender: str,
+    original_message: str,
+    signed_for: str = AGENT_ID,
+    subject: str = "Signed Message",
+    body_prefix: str = "Here you go.",
+    include_marker: bool = True,
+):
     signed_message = {
         "original_message": original_message,
         "signature": "ZmFrZS1zaWduYXR1cmU=",
@@ -94,11 +101,15 @@ def signed_payload_message(sender: str, original_message: str, signed_for: str =
         "timestamp": "2026-06-22T00:00:00",
         "signature_type": "rsa_pss_sha256",
     }
+    if include_marker:
+        body = f"{body_prefix}\n\nSIGNED_MESSAGE_JSON:{json.dumps(signed_message, separators=(',', ':'))}"
+    else:
+        body = json.dumps(signed_message)
     return {
         "from": sender,
         "to": AGENT_ID,
-        "subject": "Signed Message",
-        "body": f"Here you go.\n\nSIGNED_MESSAGE_JSON:{json.dumps(signed_message, separators=(',', ':'))}",
+        "subject": subject,
+        "body": body,
     }
 
 
@@ -128,10 +139,17 @@ def main() -> None:
     agent.on_message_batch([round1])
     assert_equal(len(agent._events["sent"]), 2, "duplicate moderator message suppression")
 
-    reply1 = signed_payload_message("alice", assigned_round1)
+    reply1 = signed_payload_message("alice", assigned_round1, subject="Re: Signature Request")
     agent.on_message_batch([reply1])
     assert_equal(len(agent._events["submitted"]), 1, "signature submission from pending request")
-    agent.on_message_batch([reply1])
+    reply1_duplicate_subject = signed_payload_message(
+        "alice",
+        assigned_round1,
+        subject="Signature Request Response",
+        body_prefix="Thanks!",
+        include_marker=False,
+    )
+    agent.on_message_batch([reply1_duplicate_subject])
     assert_equal(len(agent._events["submitted"]), 1, "duplicate signed payload suppression")
 
     assigned_round2 = "Bravo message with newline-safe handling."
@@ -153,6 +171,15 @@ def main() -> None:
     delayed_reply = signed_payload_message("bob", assigned_round1)
     agent.on_message_batch([delayed_reply])
     assert_equal(len(agent._events["submitted"]), 2, "delayed previous-round signature accepted once")
+
+    tampered_reply = signed_payload_message(
+        "bob",
+        assigned_round1 + "!",
+        subject="Re: Signature request",
+        include_marker=False,
+    )
+    agent.on_message_batch([tampered_reply])
+    assert_equal(len(agent._events["submitted"]), 2, "tampered signed payload rejected")
 
     duplicate_round1 = request_message(
         "mallory",
