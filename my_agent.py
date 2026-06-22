@@ -203,12 +203,10 @@ class CustomAgent(BaseAgent):
 
     def _maybe_submit_received_signature(self, message: Dict) -> bool:
         body = str(message.get("body", "") or "")
-        if _SIGNED_MARKER not in body:
-            return False
-
         signed_message = self._extract_signed_message(body)
         if not signed_message:
-            logger.info("Signed marker present but payload could not be parsed; falling back to BaseAgent")
+            if "signed" in str(message.get("subject", "") or "").lower():
+                logger.info("Signed subject seen but payload could not be parsed; falling back to BaseAgent")
             return False
 
         original_message = str(signed_message.get("original_message", ""))
