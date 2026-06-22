@@ -87,6 +87,7 @@ class CustomAgent(BaseAgent):
 
     def on_message_batch(self, messages: List[Dict]) -> None:
         fallback: List[Dict] = []
+        non_moderator_messages: List[Dict] = []
 
         for message in messages:
             message_id = str(message.get("message_id") or "").strip()
@@ -105,6 +106,11 @@ class CustomAgent(BaseAgent):
                 fallback.append(message)
                 continue
 
+            non_moderator_messages.append(message)
+
+        # Process moderator instructions first so request and signature handling
+        # in the same batch sees the current round state instead of stale data.
+        for message in non_moderator_messages:
             if self._maybe_submit_received_signature(message):
                 continue
 
