@@ -194,7 +194,7 @@ class CustomAgent(BaseAgent):
             # TODO(strategy): learn which request targets are fastest / most reliable in live ladders.
             self.send_message(
                 to_agent=agent_id,
-                subject="Signature Request",
+                subject="Request for Signature",
                 body=f"Please sign this message for me: {self.current_assigned_message}",
             )
             logger.info("Sent signature request to %s", agent_id)
