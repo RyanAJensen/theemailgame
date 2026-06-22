@@ -38,14 +38,16 @@ _STOPWORDS = {
 }
 
 _ASSIGNED_PATTERNS = (
-    r"(?im)^\s*(?:[-*\d.)\s]*)?(?:your|my|the)?\s*message(?:\s+this\s+round)?\s+is\s*[:\-]\s*(.+)$",
-    r"(?im)^\s*(?:[-*\d.)\s]*)?(?:exact\s+message|assigned\s+message|message\s+to\s+sign|you\s+must\s+get\s+signatures\s+for\s+this\s+exact\s+message)\s*[:\-]\s*(.+)$",
+    r"(?im)^\s*(?:[-*\d.)\s]*)?(?:your|my|the)?\s*(?:assigned\s+)?message(?:\s+this\s+round)?\s*(?:is|:|-|—)\s*(.+)$",
+    r"(?im)^\s*(?:[-*\d.)\s]*)?(?:exact\s+message|assigned\s+message|message\s+to\s+sign|message\s+you\s+must\s+sign|message\s+assigned\s+to\s+you)\s*(?:is|:|-|—)\s*(.+)$",
+    r"(?im)^\s*(?:[-*\d.)\s]*)?(?:you\s+must\s+get\s+signatures\s+for\s+this\s+exact\s+message|you\s+must\s+request\s+signatures\s+for\s+this\s+exact\s+message)\s*(?:is|:|-|—)\s*(.+)$",
 )
 _REQUEST_PATTERNS = (
-    r"(?im)^\s*(?:[-*\d.)\s]*)?(?:you\s+must\s+request\s+signatures\s+from\s+these\s+agents|request\s+signatures\s+from\s+these\s+agents|request\s+signatures\s+from\s+these|your\s+request\s+list\s+is)\s*[:\-]\s*(.+)$",
+    r"(?im)^\s*(?:[-*\d.)\s]*)?(?:you\s+must\s+)?request(?:\s+signatures)?\s+from(?:\s+these)?(?:\s+agents)?\s*(?:is|are|:|-|—)\s*(.+)$",
+    r"(?im)^\s*(?:[-*\d.)\s]*)?(?:request\s+signatures\s+from\s+these\s+agents|request\s+signatures\s+from\s+these|request\s+list|request\s+targets|your\s+request\s+list)\s*(?:is|are|:|-|—)\s*(.+)$",
 )
 _AUTH_PATTERNS = (
-    r"(?im)^\s*(?:[-*\d.)\s]*)?(?:you\s+are\s+authorized\s+to\s+sign\s+for|you\s+may\s+sign\s+for|you\s+are\s+allowed\s+to\s+sign\s+for|you\s+are\s+authorized\s+to\s+sign\s+these\s+agents)\s*[:\-]\s*(.+)$",
+    r"(?im)^\s*(?:[-*\d.)\s]*)?(?:you\s+are\s+authorized\s+to\s+sign(?:\s+messages)?\s+for(?:\s+these)?(?:\s+agents)?|you\s+may\s+sign(?:\s+messages)?\s+for(?:\s+these)?(?:\s+agents)?|you\s+are\s+allowed\s+to\s+sign(?:\s+messages)?\s+for(?:\s+these)?(?:\s+agents)?|authorized\s+to\s+sign(?:\s+messages)?\s+for(?:\s+these)?(?:\s+agents)?|signing\s+permissions(?:\s+for(?:\s+these)?(?:\s+agents)?)?|sign\s+permissions(?:\s+for(?:\s+these)?(?:\s+agents)?)?)\s*(?:is|are|:|-|—)\s*(.+)$",
 )
 
 
@@ -71,10 +73,12 @@ class CustomAgent(BaseAgent):
         self.current_authorization_resolved: List[str] = []
         self.current_authorization_has_fuzzy = False
         self._seen_message_ids: Set[str] = set()
-        self._sent_request_keys: Set[Tuple[int, str, str]] = set()
+        self._sent_request_keys: Set[Tuple[int, str, Tuple[str, ...]]] = set()
         self._submitted_signature_keys: Set[Tuple[str, str, str]] = set()
         self._handled_request_keys: Set[Tuple[str, str]] = set()
         self._declined_request_keys: Set[Tuple[str, str]] = set()
+        self._processed_moderator_keys: Set[Tuple[int, str, Tuple[str, ...], Tuple[str, ...], Tuple[str, ...]]] = set()
+        self._pending_signature_requests: Dict[str, Set[str]] = {}
         self._sender_history: Dict[str, List[str]] = {}
 
     def on_new_game(self) -> None:
@@ -117,12 +121,20 @@ class CustomAgent(BaseAgent):
         subject = str(message.get("subject", "") or "")
 
         parsed_round = self._extract_round_number(body, subject)
-        if parsed_round is not None:
-            self.current_round = parsed_round
-        elif self.current_round == 0:
-            self.current_round = 1
+        if parsed_round is None:
+            if self.current_round == 0:
+                self.current_round = 1
+            else:
+                logger.warning("Moderator round number missing; keeping round %s", self.current_round)
         else:
-            logger.warning("Moderator round number missing; keeping round %s", self.current_round)
+            if self.current_round and parsed_round < self.current_round:
+                logger.info(
+                    "Ignoring stale moderator message for round %s (current round %s)",
+                    parsed_round,
+                    self.current_round,
+                )
+                return True
+            self.current_round = parsed_round
 
         assigned = self._extract_first_labeled_value(body, _ASSIGNED_PATTERNS)
         request_targets = self._extract_agent_list(body, _REQUEST_PATTERNS, require_explicit=True)
@@ -136,11 +148,23 @@ class CustomAgent(BaseAgent):
             return False
 
         self.current_assigned_message = assigned
-        self.current_request_targets = request_targets
+        self.current_request_targets = self._dedupe(request_targets)
         self.current_authorized_signers = auth_ids
         self.current_authorized_descriptions = auth_descriptions
         self.current_authorization_has_fuzzy = bool(auth_descriptions)
         self._refresh_authorization_resolution()
+
+        moderator_key = (
+            self.current_round,
+            self.current_assigned_message,
+            tuple(sorted(self.current_request_targets)),
+            tuple(self.current_authorized_signers),
+            tuple(self.current_authorized_descriptions),
+        )
+        if moderator_key in self._processed_moderator_keys:
+            logger.info("Round %s moderator batch already handled; skipping duplicate message", self.current_round)
+            return True
+        self._processed_moderator_keys.add(moderator_key)
 
         logger.info(
             "Round %s: assigned=%s request_targets=%s auth_ids=%s fuzzy=%s",
@@ -151,11 +175,14 @@ class CustomAgent(BaseAgent):
             len(self.current_authorized_descriptions),
         )
 
-        request_key = (self.current_round, self.current_assigned_message, ",".join(self.current_request_targets))
+        request_key = (self.current_round, self.current_assigned_message, tuple(sorted(self.current_request_targets)))
         if request_key in self._sent_request_keys:
             logger.info("Round %s request batch already sent; skipping duplicate moderator batch", self.current_round)
             return True
         self._sent_request_keys.add(request_key)
+
+        pending = self._pending_signature_requests.setdefault(self.current_assigned_message, set())
+        pending.update(self.current_request_targets)
 
         for agent_id in self._dedupe(self.current_request_targets):
             # TODO(strategy): learn which request targets are fastest / most reliable in live ladders.
@@ -177,10 +204,24 @@ class CustomAgent(BaseAgent):
         if not signed_message:
             return True
 
+        original_message = str(signed_message.get("original_message", ""))
+        signer = self._normalize_agent_id(str(signed_message.get("signer", "")))
+        signed_for = self._normalize_agent_id(str(signed_message.get("signed_for", "")))
+        expected_signers = self._pending_signature_requests.get(original_message)
+        if not expected_signers:
+            logger.info("Ignoring signed payload for unrequested message")
+            return True
+        if signer not in expected_signers:
+            logger.warning("Ignoring signature from unexpected signer %s", signer or "<unknown>")
+            return True
+        if signed_for and signed_for != self.agent_id:
+            logger.warning("Ignoring signature for unexpected recipient %s", signed_for)
+            return True
+
         key = (
-            self._normalize_agent_id(str(signed_message.get("signer", ""))),
-            self._normalize_agent_id(str(signed_message.get("signed_for", ""))),
-            str(signed_message.get("original_message", "")),
+            signer,
+            signed_for,
+            original_message,
         )
         if key in self._submitted_signature_keys:
             logger.info("Duplicate signed payload ignored: %s -> %s", key[0], key[1])
@@ -189,6 +230,9 @@ class CustomAgent(BaseAgent):
         result = self.submit_signature(signed_message)
         if result.get("success"):
             self._submitted_signature_keys.add(key)
+            expected_signers.discard(signer)
+            if not expected_signers:
+                self._pending_signature_requests.pop(original_message, None)
             logger.info("Submitted received signature from %s", key[0])
         else:
             logger.warning("Signature submission failed for %s -> %s", key[0], key[1])
@@ -206,12 +250,11 @@ class CustomAgent(BaseAgent):
 
         self._refresh_authorization_resolution()
         request_key = (requester, request)
+        if request_key in self._handled_request_keys:
+            logger.info("Duplicate signature request ignored from %s", requester)
+            return True
 
         if requester in self.current_authorization_resolved:
-            if request_key in self._handled_request_keys:
-                logger.info("Duplicate signature request ignored from %s", requester)
-                return True
-
             result = self.sign_and_respond(
                 to_agent=requester,
                 message_to_sign=request,
@@ -225,22 +268,20 @@ class CustomAgent(BaseAgent):
                 logger.warning("Failed to sign request from %s", requester)
             return True
 
-        if self.current_authorized_signers or self.current_authorized_descriptions:
-            if request_key in self._declined_request_keys:
-                return True
-            self.send_message(
-                to_agent=requester,
-                subject="Cannot sign this request",
-                body=(
-                    "I cannot confidently sign that request for this round. "
-                    "Please send only to agents I am authorized to sign for."
-                ),
-            )
-            self._declined_request_keys.add(request_key)
-            logger.info("Declined request from %s", requester)
+        if request_key in self._declined_request_keys:
             return True
 
-        return False
+        self.send_message(
+            to_agent=requester,
+            subject="Cannot sign this request",
+            body=(
+                "I cannot sign that request. Please send only to agents I am "
+                "authorized to sign for this round."
+            ),
+        )
+        self._declined_request_keys.add(request_key)
+        logger.info("Declined request from %s", requester)
+        return True
 
     def _refresh_authorization_resolution(self) -> None:
         resolved: List[str] = []
@@ -312,7 +353,7 @@ class CustomAgent(BaseAgent):
             if match:
                 value = match.group(1).strip()
                 value = CustomAgent._strip_wrapping_quotes(value)
-                if value:
+                if value and re.search(r"[A-Za-z0-9]", value):
                     return value
         return None
 
