@@ -63,6 +63,21 @@ MAX_OBSERVED_LINES = 180
 MAX_EVENT_READ_LINES = 3000
 MAX_COMMAND_AUDIT = 40
 HOUSE_BOT_IDS = {"house_bot_1", "house_bot_2", "house_bot_3"}
+BOT_TO_BOT_SAFE_COMMANDS = {
+    "/help",
+    "/status",
+    "/logs",
+    "/match",
+    "/metrics",
+    "/budget",
+    "/usage",
+    "/readiness",
+    "/rank",
+    "/participants",
+    "/leaderboard",
+    "/version",
+}
+DEFAULT_TESTER_BOT_USERNAME = "EmailGameTesterBot"
 
 OSC8_LINK_RE = re.compile(r"\x1b]8;;.*?\x1b\\")
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -637,7 +652,7 @@ class TelegramClient:
         )
         return latest + 1 if latest >= 0 else 0
 
-    def send(self, message: str, parse_mode: str = TELEGRAM_PARSE_MODE) -> bool:
+    def send(self, message: str, parse_mode: str = TELEGRAM_PARSE_MODE, chat_id: Optional[str] = None) -> bool:
         message = message.strip()
         if not message:
             return False
@@ -649,7 +664,7 @@ class TelegramClient:
 
         payload = urlencode(
             {
-                "chat_id": self.chat_id,
+                "chat_id": chat_id or self.chat_id,
                 "text": message,
                 "parse_mode": parse_mode,
                 "disable_web_page_preview": "true",
@@ -1273,22 +1288,35 @@ class EmailGameMonitor:
             return
 
         chat_id = chat.get("id")
-        if str(chat_id) != self.telegram.chat_id:
+        text = str(message.get("text") or "").strip()
+        parts = text.split() if text.startswith("/") else []
+        command = parts[0].split("@", 1)[0] if parts else ""
+        bot_to_bot = self._is_authorized_bot_to_bot_message(message, command)
+        if str(chat_id) != self.telegram.chat_id and not bot_to_bot:
             self.state.telegram_offset = update_id_int + 1
             self._persist_state()
             return
 
-        text = str(message.get("text") or "").strip()
-        if text.startswith("/"):
-            parts = text.split()
-            command = parts[0].split("@", 1)[0]
+        if command:
             response = self._dispatch_command(command, parts[1:])
             self._record_telegram_command(command, bool(response))
             if response:
-                self._telegram_send(response)
+                self._telegram_send(response, chat_id=str(chat_id) if bot_to_bot else None)
 
         self.state.telegram_offset = update_id_int + 1
         self._persist_state()
+
+    def _is_authorized_bot_to_bot_message(self, message: Dict[str, object], command: str) -> bool:
+        if command not in BOT_TO_BOT_SAFE_COMMANDS:
+            return False
+        sender = message.get("from")
+        if not isinstance(sender, dict):
+            return False
+        if not bool(sender.get("is_bot")):
+            return False
+        username = str(sender.get("username") or "").lstrip("@")
+        expected = (_env("EMAIL_GAME_TESTER_BOT_USERNAME") or DEFAULT_TESTER_BOT_USERNAME).lstrip("@")
+        return bool(username and expected and username.lower() == expected.lower())
 
     def _record_telegram_command(self, command: str, response_present: bool) -> None:
         safe_command = command if re.fullmatch(r"/[A-Za-z0-9_]+", command) else "/unknown"
@@ -1380,9 +1408,9 @@ class EmailGameMonitor:
             "Note: house_bot_* are built-in competition bots/opponents."
         )
 
-    def _telegram_send(self, message: str) -> None:
+    def _telegram_send(self, message: str, chat_id: Optional[str] = None) -> None:
         for chunk in _chunk_text(message):
-            self.telegram.send(chunk, parse_mode=TELEGRAM_PARSE_MODE)
+            self.telegram.send(chunk, parse_mode=TELEGRAM_PARSE_MODE, chat_id=chat_id)
 
     def _coach(self) -> EmailGameCoach:
         return EmailGameCoach(
