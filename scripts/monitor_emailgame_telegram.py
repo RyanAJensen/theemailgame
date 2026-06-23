@@ -941,6 +941,8 @@ class EmailGameMonitor:
                 continue
             self._line_buffer.append(line)
             self._record_line(line, observed_now)
+            if "chat/completions" in line.lower():
+                self._budget().record_llm_call(observed_now)
             event = self._classify(line)
             if event:
                 self._notify(event, observed_now)

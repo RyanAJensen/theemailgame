@@ -35,6 +35,7 @@ MAX_LOG_BYTES = 2_500_000
 ALERT_COOLDOWN_SECONDS = 15 * 60
 LLM_SPIKE_15M_THRESHOLD = 20
 FLAT_USAGE_15M_THRESHOLD = 6
+MAX_LLM_CALL_EVENTS = 2000
 
 CALL_RE = re.compile(
     r"HTTP Request:\s+POST\s+https://the-email-game-llm\.fly\.dev/(?:v1/)?chat/completions",
@@ -140,18 +141,22 @@ class EmailGameBudget:
         self.state = _read_json(budget_state_file)
 
     def analyze(self, *, persist: bool = True) -> BudgetAnalysis:
+        self.state = _read_json(self.budget_state_file)
         now = _now()
         log_text = self._read_recent_log_text()
         log_calls, untimed_calls, token_totals, parse_errors, model = self._parse_log(log_text, now)
         observed_calls = self._parse_observed_calls()
-        calls_for_windows = observed_calls or log_calls
+        recorded_calls = self._recorded_call_times()
+        calls_for_windows = recorded_calls or observed_calls or log_calls
         score_deltas = self._score_deltas()
         token_tracking_available = any(token_totals.values())
         windows_available = bool(calls_for_windows)
         calls_15m = _count_since(calls_for_windows, now, 15) if windows_available else 0
         calls_30m = _count_since(calls_for_windows, now, 30) if windows_available else 0
         calls_60m = _count_since(calls_for_windows, now, 60) if windows_available else 0
-        total_calls = len(log_calls) + untimed_calls
+        parsed_total_calls = len(log_calls) + untimed_calls
+        historical_total_calls = self._historical_total_calls(parsed_total_calls)
+        total_calls = max(parsed_total_calls, historical_total_calls + len(recorded_calls))
         warnings = self._warnings(calls_15m, score_deltas, token_tracking_available, parse_errors, windows_available)
         analysis = BudgetAnalysis(
             budget_usd=CONFIGURED_BUDGET_USD,
@@ -173,6 +178,35 @@ class EmailGameBudget:
         if persist:
             self._record_state(analysis, now)
         return analysis
+
+    def record_llm_call(
+        self,
+        ts: datetime,
+        *,
+        model: str = DEFAULT_MODEL,
+        source: str = "monitor_log_ingest",
+        tokens: Optional[Dict[str, int]] = None,
+        cost_usd: Optional[float] = None,
+    ) -> None:
+        self.state = _read_json(self.budget_state_file)
+        if "historical_total_calls" not in self.state:
+            self.state["historical_total_calls"] = self._historical_total_calls(0)
+
+        events = self.state.get("llm_call_events")
+        if not isinstance(events, list):
+            events = []
+        safe_model = model if model in {"gpt-4.1", "gpt-4.1-mini"} else DEFAULT_MODEL
+        safe_tokens = tokens if isinstance(tokens, dict) else None
+        event = {
+            "ts": ts.astimezone(SAST_TZ).isoformat(),
+            "model": safe_model,
+            "source": source,
+            "tokens": safe_tokens,
+            "cost_usd": cost_usd if isinstance(cost_usd, (int, float)) else None,
+        }
+        events.append(event)
+        self.state["llm_call_events"] = events[-MAX_LLM_CALL_EVENTS:]
+        _write_json(self.budget_state_file, self.state)
 
     def budget_text(self) -> str:
         analysis = self.analyze(persist=True)
@@ -342,6 +376,30 @@ class EmailGameBudget:
         calls.sort()
         return calls
 
+    def _recorded_call_times(self) -> List[datetime]:
+        events = self.state.get("llm_call_events")
+        if not isinstance(events, list):
+            return []
+        calls: List[datetime] = []
+        for item in events:
+            if not isinstance(item, dict):
+                continue
+            parsed = _parse_dt(item.get("ts"))
+            if parsed is not None:
+                calls.append(parsed)
+        calls.sort()
+        return calls
+
+    def _historical_total_calls(self, parsed_total_calls: int) -> int:
+        historical = _int_or_none(self.state.get("historical_total_calls"))
+        if historical is not None:
+            return historical
+        snapshot = self.state.get("last_snapshot")
+        snapshot_total = None
+        if isinstance(snapshot, dict):
+            snapshot_total = _int_or_none(snapshot.get("total_calls"))
+        return max(parsed_total_calls, snapshot_total or 0)
+
     def _line_timestamp(self, line: str, now: datetime, current_day: Any) -> Optional[datetime]:
         match = TIME_PREFIX_RE.search(line)
         if not match:
@@ -415,6 +473,7 @@ class EmailGameBudget:
         return warnings
 
     def _record_state(self, analysis: BudgetAnalysis, now: datetime) -> None:
+        self.state.setdefault("historical_total_calls", analysis.total_calls)
         self.state["last_analysis_at"] = now.isoformat()
         self.state["last_snapshot"] = {
             "budget_usd": analysis.budget_usd,
