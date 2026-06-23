@@ -31,6 +31,8 @@ COMMANDS: List[Dict[str, str]] = [
     {"command": "rank", "description": "my rank and gaps"},
     {"command": "participants", "description": "leaderboard visibility"},
     {"command": "readiness", "description": "competition readiness report"},
+    {"command": "budget", "description": "LLM budget and remaining estimate"},
+    {"command": "usage", "description": "recent LLM call usage"},
     {"command": "coach", "description": "performance analysis"},
     {"command": "recommend", "description": "next Codex goal"},
     {"command": "reviewmatch", "description": "latest match diagnosis"},

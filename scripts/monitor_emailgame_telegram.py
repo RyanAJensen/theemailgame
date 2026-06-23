@@ -31,6 +31,11 @@ except ModuleNotFoundError:  # pragma: no cover - supports module-style imports 
     from scripts.emailgame_coach import EmailGameCoach
 
 try:
+    from emailgame_budget import EmailGameBudget
+except ModuleNotFoundError:  # pragma: no cover - supports module-style imports in tests.
+    from scripts.emailgame_budget import EmailGameBudget
+
+try:
     from zoneinfo import ZoneInfo
 except Exception:  # pragma: no cover - zoneinfo is available on modern Python, but keep fallback.
     ZoneInfo = None  # type: ignore[assignment]
@@ -39,6 +44,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOG_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-live.log"
 STATE_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-monitor-state.json"
 LEADERBOARD_STATE_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-leaderboard-state.json"
+BUDGET_STATE_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-budget-state.json"
 POLL_INTERVAL_SEC = 1.0
 TELEGRAM_POLL_INTERVAL_SEC = 0.0
 TELEGRAM_HTTP_TIMEOUT_SEC = 40
@@ -677,6 +683,7 @@ class EmailGameMonitor:
             f"pid={os.getpid()} phase={self._derive_phase()} "
             f"log_age={self._format_age(self._log_file_age_seconds())}"
         )
+        self._maybe_send_budget_alert()
 
     def _leaderboard_poll_interval_seconds(self) -> int:
         raw = _env("EMAIL_GAME_LEADERBOARD_POLL_SECONDS")
@@ -1010,6 +1017,10 @@ class EmailGameMonitor:
             return self._participants_text()
         if command == "/readiness":
             return self._readiness_text()
+        if command == "/budget":
+            return self._budget_text()
+        if command == "/usage":
+            return self._usage_text()
         if command == "/reconnectlog":
             return self._reconnect_log_text()
         if command in ("/why", "/reminders"):
@@ -1053,6 +1064,8 @@ class EmailGameMonitor:
             "/rank — my rank and gaps\n"
             "/participants — leaderboard visibility\n"
             "/readiness — competition readiness report\n"
+            "/budget — LLM budget and remaining estimate\n"
+            "/usage — recent LLM call usage\n"
             "/coach — concise performance analysis\n"
             "/recommend — next recommended Codex goal\n"
             "/reviewmatch — latest match diagnosis\n"
@@ -1075,8 +1088,22 @@ class EmailGameMonitor:
             leaderboard_state_file=self.leaderboard_state_file,
         )
 
+    def _budget(self) -> EmailGameBudget:
+        return EmailGameBudget(
+            log_file=self.log_file,
+            monitor_state_file=self.state_file,
+            leaderboard_state_file=self.leaderboard_state_file,
+            budget_state_file=BUDGET_STATE_FILE,
+        )
+
     def _coach_text(self) -> str:
         return self._coach().telegram_coach_text()
+
+    def _budget_text(self) -> str:
+        return self._budget().budget_text()
+
+    def _usage_text(self) -> str:
+        return self._budget().usage_text()
 
     def _recommend_text(self) -> str:
         return self._coach().telegram_recommend_text()
@@ -1126,6 +1153,15 @@ class EmailGameMonitor:
             message = self._coach().maybe_alert_text(reason)
         except Exception as exc:
             print(f"[monitor] coach analysis failed: {_redact(str(exc))}")
+            return
+        if message:
+            self._telegram_send(message)
+
+    def _maybe_send_budget_alert(self) -> None:
+        try:
+            message = self._budget().maybe_alert_text()
+        except Exception as exc:
+            print(f"[monitor] budget analysis failed: {_redact(str(exc))}")
             return
         if message:
             self._telegram_send(message)
