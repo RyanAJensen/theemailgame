@@ -746,7 +746,6 @@ class EmailGameMonitor:
 
     def _connected_message(self) -> str:
         return (
-            f"{html_escape(_format_sast(), quote=False)} • "
             "✅ <b>Email Game Monitor Connected</b>\n\n"
             f"Agent: <code>{html_escape(self._agent_name, quote=False)}</code>"
         )
@@ -1856,13 +1855,13 @@ class EmailGameMonitor:
         top = [entry for entry in entries[:5] if isinstance(entry, dict)]
         me = self._my_leaderboard_entry(entries)
         if full_requested:
-            lines = ["🏆 <b>Testing Leaderboard Full</b>", ""]
+            lines = ["🏆 <b>Testing Leaderboard Full</b>", "", f"Fetched: <b>{html_escape(_format_sast(), quote=False)}</b>", ""]
             if len(entries) <= 5:
                 lines.append("Server currently exposes only Top 5 to this parser/source.")
                 lines.append("")
             display = entries
         else:
-            lines = ["🏆 <b>Testing Leaderboard</b>", ""]
+            lines = ["🏆 <b>Testing Leaderboard</b>", "", f"Fetched: <b>{html_escape(_format_sast(), quote=False)}</b>", ""]
             display = top
 
         for entry in display:

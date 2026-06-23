@@ -226,6 +226,7 @@ class EmailGameBudget:
             f"15m: <b>{self._window_text(analysis.calls_15m, analysis.latest_call_at)}</b>",
             f"30m: <b>{self._window_text(analysis.calls_30m, analysis.latest_call_at)}</b>",
             f"60m: <b>{self._window_text(analysis.calls_60m, analysis.latest_call_at)}</b>",
+            f"Latest call: <b>{html_escape(_fmt_dt(analysis.latest_call_at), quote=False)}</b>",
             f"Total observed: <b>{analysis.total_calls}</b>",
             "",
             f"Model: <code>{html_escape(analysis.model, quote=False)}</code>",
