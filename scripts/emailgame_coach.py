@@ -131,6 +131,7 @@ def _agent_label(agent_id: str) -> str:
 class RoundMetrics:
     round_id: str
     requests_sent: List[str] = field(default_factory=list)
+    request_targets: Optional[int] = None
     requests_received: List[str] = field(default_factory=list)
     signed_replies_received: List[str] = field(default_factory=list)
     signatures_submitted: List[str] = field(default_factory=list)
@@ -163,7 +164,10 @@ class MatchMetrics:
         return sum(len(round_metrics.signed_replies_received) for round_metrics in self.rounds.values())
 
     def total_requests_sent(self) -> int:
-        return sum(len(round_metrics.requests_sent) for round_metrics in self.rounds.values())
+        return sum(
+            max(len(round_metrics.requests_sent), round_metrics.request_targets or 0)
+            for round_metrics in self.rounds.values()
+        )
 
 
 @dataclass
@@ -215,7 +219,12 @@ class EmailGameCoach:
         deltas = {minutes: self._score_delta(history, minutes) for minutes in (15, 30, 60)}
         rank_delta = self._rank_delta(history)
         log_age_seconds = self._log_age_seconds()
-        latest_log_stale = bool(log_age_seconds is not None and log_age_seconds > 300)
+        monitor_observed_age_seconds, monitor_between_matches = self._monitor_observed_status()
+        file_stale = bool(log_age_seconds is not None and log_age_seconds > 300)
+        monitor_fresh = bool(
+            monitor_observed_age_seconds is not None and monitor_observed_age_seconds <= 300
+        )
+        latest_log_stale = bool(file_stale and not monitor_fresh and not monitor_between_matches)
         match_review_exists, match_review_notes = self._match_review_notes()
         weaknesses = self._detect_weaknesses(latest_matches, latest_log_stale)
         recommendation = self._recommend(latest_matches, weaknesses, deltas, rank_delta, latest_log_stale, match_review_notes)
@@ -337,8 +346,9 @@ class EmailGameCoach:
             "Rounds:",
         ]
         for round_id, round_metrics in self._sorted_rounds(match):
+            sent_count = max(len(round_metrics.requests_sent), round_metrics.request_targets or 0)
             lines.append(
-                f"- Round {round_id}: sent {len(round_metrics.requests_sent)}, "
+                f"- Round {round_id}: sent {sent_count}, "
                 f"replies {len(round_metrics.signed_replies_received)}, "
                 f"submitted {len(round_metrics.signatures_submitted)}, "
                 f"reminders {round_metrics.action_reminders}"
@@ -504,7 +514,35 @@ class EmailGameCoach:
         except OSError:
             return None
 
-    def _read_log_lines(self) -> List[str]:
+    def _monitor_observed_status(self) -> Tuple[Optional[float], bool]:
+        state = _read_json(self.monitor_state_file)
+        observed = state.get("observed_lines")
+        if not isinstance(observed, list):
+            return None, False
+        latest_ts: Optional[datetime] = None
+        latest_text = ""
+        for raw in observed:
+            if not isinstance(raw, dict):
+                continue
+            text = str(raw.get("text") or "")
+            if not text.startswith("[INFO]") and not text.startswith(f"[{self.agent_name}]"):
+                continue
+            ts = _parse_dt(raw.get("ts"))
+            if ts is None:
+                continue
+            if latest_ts is None or ts > latest_ts:
+                latest_ts = ts
+                latest_text = text
+        if latest_ts is None:
+            return None, False
+        age_seconds = max(0.0, (_now() - latest_ts).total_seconds())
+        between_matches = "Game over - between matches now" in latest_text or state.get("phase") == "between matches"
+        return age_seconds, between_matches
+
+    def _read_log_entries(self) -> List[Tuple[str, Optional[datetime]]]:
+        observed_entries = self._read_monitor_observed_entries()
+        if observed_entries and self._log_age_seconds() is not None and self._log_age_seconds() > 300:
+            return observed_entries
         if not self.log_file.exists():
             return []
         try:
@@ -515,7 +553,24 @@ class EmailGameCoach:
                 data = handle.read().decode("utf-8", "replace")
         except OSError:
             return []
-        return [_redact(line.strip()) for line in data.splitlines() if line.strip()]
+        return [(_redact(line.strip()), None) for line in data.splitlines() if line.strip()]
+
+    def _read_monitor_observed_entries(self) -> List[Tuple[str, Optional[datetime]]]:
+        state = _read_json(self.monitor_state_file)
+        observed = state.get("observed_lines")
+        if not isinstance(observed, list):
+            return []
+        entries: List[Tuple[str, Optional[datetime]]] = []
+        for raw in observed:
+            if not isinstance(raw, dict):
+                continue
+            text = _redact(str(raw.get("text") or "").strip())
+            if not text:
+                continue
+            if not text.startswith("[INFO]") and not text.startswith(f"[{self.agent_name}]"):
+                continue
+            entries.append((text, _parse_dt(raw.get("ts"))))
+        return entries
 
     def _match_review_notes(self) -> Tuple[bool, List[str]]:
         if not self.match_review_file.exists():
@@ -542,17 +597,17 @@ class EmailGameCoach:
         current: Optional[MatchMetrics] = None
         current_round_id: Optional[str] = None
 
-        for raw_line in self._read_log_lines():
+        for raw_line, entry_ts in self._read_log_entries():
             line = raw_line.strip()
             if not line:
                 continue
             if self._is_match_start(line):
-                current = MatchMetrics(index=len(matches) + 1, started_at=_now())
+                current = MatchMetrics(index=len(matches) + 1, started_at=entry_ts or _now())
                 matches.append(current)
                 current_round_id = None
                 continue
             if current is None:
-                current = MatchMetrics(index=len(matches) + 1)
+                current = MatchMetrics(index=len(matches) + 1, started_at=entry_ts)
                 matches.append(current)
 
             round_id = self._extract_round_id(line)
@@ -562,7 +617,7 @@ class EmailGameCoach:
 
             if self._is_match_end(line):
                 current.ended = True
-                current.ended_at = _now()
+                current.ended_at = entry_ts or _now()
                 current = None
                 current_round_id = None
                 continue
@@ -574,6 +629,9 @@ class EmailGameCoach:
 
             if "[INFO] Round " in line and "fuzzy=" in line:
                 round_metrics = self._round(current, current_round_id or round_id or "unknown")
+                targets_match = re.search(r"request_targets=(\d+)", line)
+                if targets_match:
+                    round_metrics.request_targets = int(targets_match.group(1))
                 fuzzy_match = re.search(r"fuzzy=(\d+)", line)
                 round_metrics.parser_fallbacks += int(fuzzy_match.group(1)) if fuzzy_match else 0
 
@@ -713,7 +771,9 @@ class EmailGameCoach:
             for round_id, round_metrics in match.rounds.items()
             if round_id in {"2", "3"}
         ]
-        if any(len(round_metrics.requests_sent) == 0 for round_metrics in r23_rounds):
+        if any(match.total_requests_sent() == 0 for match in recent):
+            weaknesses.append("No outbound signature requests were observed in at least one recent match.")
+        if any(max(len(round_metrics.requests_sent), round_metrics.request_targets or 0) == 0 for round_metrics in r23_rounds):
             weaknesses.append("Round 2/3 request fanout missing in at least one recent round.")
         elif r23_rounds:
             weaknesses.append("Round 2/3 fanout is present in recent rounds.")
@@ -786,7 +846,7 @@ class EmailGameCoach:
             round_id
             for match in recent
             for round_id, round_metrics in match.rounds.items()
-            if round_id in {"2", "3"} and not round_metrics.requests_sent
+            if round_id in {"2", "3"} and max(len(round_metrics.requests_sent), round_metrics.request_targets or 0) == 0
         ]
         if r23_missing:
             evidence.append(f"Round 2/3 fanout missing in {len(r23_missing)} recent round(s).")

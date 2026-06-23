@@ -342,6 +342,7 @@ class LogStreamStatus:
     exists: bool
     age_seconds: Optional[float]
     stale: bool
+    file_stale: bool = False
     pane_age_seconds: Optional[float] = None
     pane_observed: bool = False
     reconnected: bool = False
@@ -736,6 +737,10 @@ class EmailGameMonitor:
             return None
         return max(0.0, (_now_sast() - latest.ts).total_seconds())
 
+    def _pane_indicates_quiescent_between_matches(self) -> bool:
+        latest = self._latest_significant_entry()
+        return bool(latest and self._is_match_end(latest.text))
+
     def _format_age(self, seconds: Optional[float]) -> str:
         if seconds is None:
             return "missing"
@@ -776,13 +781,13 @@ class EmailGameMonitor:
     ) -> LogStreamStatus:
         age_seconds = self._log_file_age_seconds()
         agent_running = self._agent_process_running()
-        stale = bool(agent_running and (age_seconds is None or age_seconds > STALE_LOG_THRESHOLD_SEC))
+        file_stale = bool(agent_running and (age_seconds is None or age_seconds > STALE_LOG_THRESHOLD_SEC))
         reconnected = False
         reconnect_error = ""
-        if stale and refresh_capture:
+        if file_stale and refresh_capture:
             self._seed_from_tmux_capture()
         reconnect_due = force_reconnect or (time.monotonic() - self._last_log_reconnect_monotonic >= 60.0)
-        if stale and reconnect and reconnect_due:
+        if file_stale and reconnect and reconnect_due:
             reconnected, reconnect_error = _tmux_reconnect_log_pipe(self.log_file)
             self._last_log_reconnect_monotonic = time.monotonic()
             if reconnected:
@@ -791,12 +796,18 @@ class EmailGameMonitor:
                     self._seed_from_tmux_capture()
             else:
                 reconnect_error = _redact(reconnect_error)
+        pane_age_seconds = self._latest_observed_age_seconds()
+        pane_observed = bool(self._observed_lines)
+        pane_fresh = bool(pane_observed and pane_age_seconds is not None and pane_age_seconds <= STALE_LOG_THRESHOLD_SEC)
+        pane_quiescent_between = bool(pane_observed and self._pane_indicates_quiescent_between_matches())
+        stale = bool(file_stale and not pane_fresh and not pane_quiescent_between)
         return LogStreamStatus(
             exists=self.log_file.exists(),
             age_seconds=age_seconds,
             stale=stale,
-            pane_age_seconds=self._latest_observed_age_seconds(),
-            pane_observed=bool(self._observed_lines),
+            file_stale=file_stale,
+            pane_age_seconds=pane_age_seconds,
+            pane_observed=pane_observed,
             reconnected=reconnected,
             reconnect_error=reconnect_error,
         )
@@ -1034,7 +1045,41 @@ class EmailGameMonitor:
         return self._coach().telegram_recommend_text()
 
     def _reviewmatch_text(self) -> str:
-        return self._coach().telegram_reviewmatch_text()
+        self._check_log_stream(reconnect=True, refresh_capture=True)
+        summary = self._latest_match_summary()
+        if summary is None:
+            return "No match diagnosis available yet."
+
+        rounds = self._sorted_round_summaries(summary)
+        requests_sent = sum(
+            max(len(round_summary.requested_from), round_summary.request_targets or 0)
+            for round_summary in rounds.values()
+        )
+        signed_replies = sum(len(round_summary.signed_from) for round_summary in rounds.values())
+        submissions = sum(1 for round_summary in rounds.values() if round_summary.submitted is True)
+        reminders = sum(round_summary.reminders for round_summary in rounds.values())
+        lines = [
+            "<b>Latest Match Diagnosis</b>",
+            "",
+            f"Started: {_format_sast(summary.started_at)}",
+            f"Status: {'ended' if summary.ended else 'in progress'}",
+            f"Rounds: {len(rounds)}",
+            f"Requests sent: {requests_sent}",
+            f"Signed replies received: {signed_replies}",
+            f"Signatures submitted: {submissions}",
+            f"Action reminders: {reminders}",
+            "",
+            "<b>Rounds:</b>",
+        ]
+        for round_id, round_summary in rounds.items():
+            sent_count = max(len(round_summary.requested_from), round_summary.request_targets or 0)
+            lines.append(
+                f"- Round {html_escape(round_id, quote=False)}: "
+                f"sent {sent_count}, replies {len(round_summary.signed_from)}, "
+                f"submitted {1 if round_summary.submitted is True else 0}, "
+                f"reminders {round_summary.reminders}"
+            )
+        return "\n".join(lines)
 
     def _metrics_text(self) -> str:
         return self._coach().telegram_metrics_text()
@@ -1165,7 +1210,7 @@ class EmailGameMonitor:
 
     def _tail_text(self, args: List[str]) -> str:
         log_status = self._check_log_stream(reconnect=True, refresh_capture=True)
-        lines = self._read_log_tail_entries(MAX_TAIL_LINES) if not log_status.stale else []
+        lines = self._read_log_tail_entries(MAX_TAIL_LINES) if not log_status.file_stale else []
         if not lines:
             lines = self._recent_observed_entries(MAX_TAIL_LINES)
         if not lines:
@@ -1314,16 +1359,18 @@ class EmailGameMonitor:
             and log_status.pane_age_seconds is not None
             and log_status.pane_age_seconds <= STALE_LOG_THRESHOLD_SEC
         )
-        source = "live log file" if not log_status.stale else ("tmux pane capture" if pane_fresh else "stale log file")
+        source = "live log file" if not log_status.file_stale else ("tmux pane capture" if log_status.pane_observed else "stale log file")
         warning_lines: List[str] = []
-        if log_status.stale:
-            warning_lines.append("⚠️ Live log file stale; monitor is using pane capture" if pane_fresh else "⚠️ Log stream stale")
-            if log_status.reconnected:
-                warning_lines.append("✅ tmux pipe reattached")
-            elif log_status.reconnect_error:
-                warning_lines.append(
-                    f"Reconnect error: <code>{html_escape(_clean_log_text(log_status.reconnect_error), quote=False)}</code>"
-                )
+        if log_status.file_stale and log_status.pane_observed:
+            warning_lines.append("ℹ️ Live log file stale; monitor is using pane capture")
+        elif log_status.stale:
+            warning_lines.append("⚠️ Log stream stale")
+        if log_status.reconnected:
+            warning_lines.append("✅ tmux pipe reattached")
+        elif log_status.reconnect_error:
+            warning_lines.append(
+                f"Reconnect error: <code>{html_escape(_clean_log_text(log_status.reconnect_error), quote=False)}</code>"
+            )
         lines = [
             "🎮 <b>Email Game Status</b>",
             "",
@@ -1742,10 +1789,11 @@ class EmailGameMonitor:
             return None
 
         def is_match_activity(line: str) -> bool:
+            log_like = line.startswith("[INFO]") or line.startswith(f"[{self._agent_name}]")
             return bool(
                 self._is_match_start(line)
                 or self._is_match_end(line)
-                or self._extract_round_id(line)
+                or (log_like and self._extract_round_id(line))
                 or "Sent signature request to " in line
                 or "Submitted received signature from " in line
                 or re.search(r"received from [^:]+:", line, re.IGNORECASE)
