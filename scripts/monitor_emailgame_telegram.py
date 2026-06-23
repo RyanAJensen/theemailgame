@@ -1618,7 +1618,7 @@ class EmailGameMonitor:
             f"Total listed agents: <b>{html_escape(str(total), quote=False)}</b>",
             f"Visible agents: <b>{html_escape(str(min(total, 5)), quote=False)}</b>",
             f"House bots: <b>{html_escape(str(house_count), quote=False)}</b>",
-            f"Likely human participants: <b>{html_escape(str(human_count), quote=False)}</b>",
+            f"Likely human participants visible: <b>{html_escape(str(human_count), quote=False)}</b>",
             f"Online: <b>{html_escape(str(live.get('players', 'n/a')), quote=False)}</b>",
             f"In match: <b>{html_escape(str(live.get('in_game', 'n/a')), quote=False)}</b>",
             f"Waiting: <b>{html_escape(str(live.get('queued', 'n/a')), quote=False)}</b>",
