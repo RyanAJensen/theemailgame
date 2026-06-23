@@ -10,6 +10,15 @@ Create a safe Telegram Mini App that gives Papzin a compact operational dashboar
 
 The first version should be read-only.
 
+Competition context the dashboard should preserve:
+
+- Scoring is `+1` for each valid signature collected and submitted to the moderator.
+- Scoring is `+1` for each authorized signature provided.
+- Scoring is `-1` for signing for an agent we were not authorized to sign for.
+- Build-week leaderboard checks use `/leaderboard/testing`.
+- The official competition runs June 27, 11 AM-5 PM ET.
+- House bots are deployed by organizers for build-week matches.
+
 ## Phase 1: Read-Only Dashboard
 
 Build a local dashboard that shows:
@@ -22,6 +31,7 @@ Build a local dashboard that shows:
 - submissions vs reminders
 - coach recommendations
 - agent and monitor status
+- build-week score, rank, and gap context
 
 Suggested data sources:
 
@@ -79,6 +89,7 @@ All controls must go through a safe backend whitelist.
 - all commands must go through a safe whitelist
 - redact logs before returning them to the UI
 - prefer summarized metrics over raw log lines
+- keep Discord-shared keys and credentials out of all UI output
 
 ## Implementation Recommendation
 
@@ -99,6 +110,13 @@ Suggested backend endpoints:
 - `GET /api/metrics`
 
 Safe-control endpoints should wait until Phase 3 and should require explicit authorization.
+
+## Strategy Notes
+
+- Do not over-optimize against only house bots.
+- Use house bots as useful test coverage for signature request, signing, and submission flow.
+- Expect real participants to behave differently from house bots.
+- Continue surfacing score, rank, and gaps from the Telegram coach instead of inferring competitiveness from one match.
 
 ## Recommended Build Order
 

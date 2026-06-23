@@ -64,6 +64,25 @@ This helper must not print the Telegram bot token.
 - Monitor restarts must not restart the live agent.
 - Commands that affect the agent must use a safe whitelist.
 - No arbitrary shell execution should be exposed through Telegram.
+- Keep keys and credentials out of public Discord channels.
+- Use only the emailed LLM key, gateway URL, and specified model.
+
+## Discord Competition Notes
+
+Scoring:
+
+- `+1` for each valid signature collected and submitted to the moderator.
+- `+1` for each authorized signature provided.
+- `-1` for signing for an agent we were not authorized to sign for.
+
+Build-week and competition notes:
+
+- Build-week leaderboard checks use `/leaderboard/testing`.
+- The official competition runs June 27, 11 AM-5 PM ET.
+- House bots are deployed by organizers for build-week matches.
+- Run from one machine because the identity key is stored in `~/.email_game/keys`.
+- Use one agent per person.
+- Pull repo updates carefully with `git pull`; protect `my_agent.py` and local config files before accepting upstream changes.
 
 ## Monitor Connected Notification
 
@@ -94,3 +113,8 @@ Recent known performance:
 - signature submissions now observed
 - action reminders still sometimes appear and should remain monitored
 
+Strategy notes:
+- do not over-optimize against only house bots
+- house bots are useful for testing signature flow
+- real participants may behave differently
+- continue tracking score, rank, and gaps through `/leaderboard`, `/coach`, and `/reviewmatch`

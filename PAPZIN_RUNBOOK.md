@@ -59,6 +59,10 @@ Primary local data sources:
 
 ## Model Rules
 
+Discord-announced competition rule:
+
+- Use only the emailed LLM key, gateway URL, and specified model.
+
 Allowed models:
 - `gpt-4.1-mini`
 - `gpt-4.1`
@@ -67,6 +71,24 @@ Default model:
 - `gpt-4.1-mini`
 
 The agent should use deterministic parsing first. LLM fallback should be used only when deterministic parsing cannot confidently extract the assignment or request target.
+
+## Competition Rules From Discord
+
+Scoring:
+
+- `+1` for each valid signature collected and submitted to the moderator.
+- `+1` for each authorized signature provided.
+- `-1` for signing for an agent we were not authorized to sign for.
+
+Operational rules:
+
+- Run from one machine because the identity key is stored in `~/.email_game/keys`.
+- Use one agent per person.
+- Keep keys and credentials out of public Discord channels.
+- Build-week leaderboard checks use `/leaderboard/testing`.
+- The official competition runs June 27, 11 AM-5 PM ET.
+- House bots are deployed by organizers for build-week matches.
+- Pull repo updates carefully with `git pull`; protect `my_agent.py` and local config files before accepting upstream changes.
 
 ## Safety Rules
 
@@ -78,6 +100,7 @@ The agent should use deterministic parsing first. LLM fallback should be used on
 - Never submit stale signed payloads.
 - Restart the agent only between matches.
 - Use monitor controls only through safe, whitelisted commands.
+- Do not over-optimize against only house bots.
 
 ## Preflight
 
@@ -158,6 +181,8 @@ Expected submission logs include:
 - Monitor output needed Telegram-specific formatting and token redaction.
 - Leaderboard polling is useful for tracking competitiveness during live play.
 - The coach helps identify issues and recommendations without exposing raw log details.
+- House bots are useful for testing signature flow, but real participants may phrase requests and coordinate differently.
+- Continue tracking score, rank, and gaps through the Telegram coach and leaderboard loop.
 
 ## Current Known Performance
 
