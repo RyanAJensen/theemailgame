@@ -836,6 +836,33 @@ class EmailGameMonitor:
         events = self._read_structured_events(limit=MAX_EVENT_READ_LINES)
         return events[-1] if events else None
 
+    def _latest_structured_event_of_type(self, event_type: str) -> Optional[StructuredEvent]:
+        events = [
+            event
+            for event in self._read_structured_events(limit=MAX_EVENT_READ_LINES)
+            if event.type == event_type
+        ]
+        return events[-1] if events else None
+
+    def _latest_match_activity_event(self) -> Optional[StructuredEvent]:
+        match_types = {
+            "round_started",
+            "request_sent",
+            "request_received",
+            "signed_reply",
+            "signature_submitted",
+            "reminder",
+            "game_started",
+            "game_ended",
+            "disconnect",
+        }
+        events = [
+            event
+            for event in self._read_structured_events(limit=MAX_EVENT_READ_LINES)
+            if event.type in match_types
+        ]
+        return events[-1] if events else None
+
     def _record_structured_event_for_line(self, line: str, ts: datetime) -> Optional[StructuredEvent]:
         event = self._structured_event_from_line(line, ts)
         if event is not None:
@@ -1592,13 +1619,25 @@ class EmailGameMonitor:
         summary = self._latest_match_summary()
         if summary is None:
             return "No match summary available yet."
-        return self._render_match_summary(summary, title="📋 <b>Recent Match Summary</b>", include_note=True, compact_reminders=True)
+        return self._render_match_summary(
+            summary,
+            title="📋 <b>Recent Match Summary</b>",
+            include_note=True,
+            compact_reminders=True,
+            idle_note=True,
+        )
 
     def _match_text(self) -> str:
         summary = self._latest_match_summary()
         if summary is None:
             return "No match summary available yet."
-        return self._render_match_summary(summary, title="📋 <b>Latest Match Summary</b>", include_note=False, compact_reminders=False)
+        return self._render_match_summary(
+            summary,
+            title="📋 <b>Latest Match Summary</b>",
+            include_note=False,
+            compact_reminders=False,
+            idle_note=True,
+        )
 
     def _reminders_text(self) -> str:
         summary = self._latest_match_summary()
@@ -1704,6 +1743,7 @@ class EmailGameMonitor:
         )
 
     def _status_text(self) -> str:
+        now_sast = _now_sast()
         log_status = self._check_log_stream(reconnect=True, refresh_capture=True)
         branch = self._branch_text()
         commit = self._commit_text()
@@ -1720,7 +1760,18 @@ class EmailGameMonitor:
         updated = _format_sast(latest_entry.ts if latest_entry else None)
         latest_event = self._latest_structured_event()
         latest_event_age = (
-            max(0.0, (_now_sast() - latest_event.ts).total_seconds()) if latest_event is not None else None
+            max(0.0, (now_sast - latest_event.ts).total_seconds()) if latest_event is not None else None
+        )
+        latest_llm_event = self._latest_structured_event_of_type("llm_call")
+        latest_match_activity = self._latest_match_activity_event()
+        last_completed_match_time = summary.started_at if summary and summary.ended else None
+        idle_waiting = bool(
+            agent_running
+            and phase in {"waiting", "between matches"}
+            and latest_event is not None
+            and latest_event_age is not None
+            and latest_event_age <= STALE_LOG_THRESHOLD_SEC
+            and (latest_match_activity is None or latest_match_activity.ts < latest_event.ts)
         )
         summary_line = self._match_summary_line(summary)
         reminder_count = sum(round_summary.reminders for round_summary in summary.rounds.values()) if summary else 0
@@ -1730,7 +1781,9 @@ class EmailGameMonitor:
         waiting_alone = self._waiting_alone()
         source = "live log file" if not log_status.file_stale else ("tmux pane capture" if log_status.pane_observed else "stale log file")
         warning_lines: List[str] = []
-        if log_status.file_stale and log_status.pane_observed:
+        if idle_waiting:
+            warning_lines.append("No new match activity; agent is waiting for another match.")
+        elif log_status.file_stale and log_status.pane_observed:
             warning_lines.append("ℹ️ Live log file stale; monitor is using pane capture")
         elif log_status.stale:
             warning_lines.append("⚠️ Log stream stale")
@@ -1748,21 +1801,25 @@ class EmailGameMonitor:
             f"Process: {process_icon} <b>{'running' if agent_running else 'stopped'}</b>",
             f"State: {state_icon} <b>{html_escape(state_label, quote=False)}</b>",
             f"State source: <b>{html_escape(source, quote=False)}</b>",
+            f"Query time: <b>{html_escape(_format_sast(now_sast), quote=False)}</b>",
             f"Log freshness: <b>{html_escape(self._format_age(log_status.age_seconds), quote=False)}</b>",
             f"Log mtime: <b>{html_escape(self._log_file_mtime_text(), quote=False)}</b>",
             f"Pane observed freshness: <b>{html_escape(self._format_age(log_status.pane_age_seconds), quote=False)}</b>",
             f"Structured event freshness: <b>{html_escape(self._format_age(latest_event_age), quote=False)}</b>",
+            f"Last structured event: <b>{html_escape(_format_sast(latest_event.ts) if latest_event else 'n/a', quote=False)}</b>",
+            f"Last LLM call: <b>{html_escape(_format_sast(latest_llm_event.ts) if latest_llm_event else 'n/a', quote=False)}</b>",
+            f"Last completed match: <b>{html_escape(_format_sast(last_completed_match_time) if last_completed_match_time else 'n/a', quote=False)}</b>",
             f"Pipe connected: <b>{html_escape(self._format_yes_no_unknown(pipe_connected), quote=False)}</b>",
             f"Pipe reconnected: <b>{'yes' if log_status.reconnected else 'no'}</b>",
             f"Pane: <code>{html_escape(pane_id, quote=False)}</code> / PID <code>{html_escape(str(pane_pid) if pane_pid else 'unknown', quote=False)}</code>",
             f"Latest round: <b>{html_escape(round_text, quote=False)}</b>",
-            f"Updated: <b>{html_escape(updated, quote=False)}</b>",
+            f"Last match log: <b>{html_escape(updated, quote=False)}</b>",
             f"Latest match: <i>{html_escape(summary_line, quote=False)}</i>",
             f"Reminder count: <b>{html_escape(str(reminder_count), quote=False)}</b>",
             f"Branch: <code>{html_escape(branch, quote=False)}</code>",
             f"Commit: <code>{html_escape(commit, quote=False)}</code>",
             f"Monitor: {monitor_icon} running",
-            f"Latest: <i>{html_escape(_format_sast(latest_entry.ts if latest_entry else None), quote=False)} • {html_escape(_clean_log_text(latest_line), quote=False)}</i>",
+            f"Last match log line: <i>{html_escape(_format_sast(latest_entry.ts if latest_entry else None), quote=False)} • {html_escape(_clean_log_text(latest_line), quote=False)}</i>",
         ]
         if warning_lines:
             lines.extend(["", *warning_lines])
@@ -2671,8 +2728,18 @@ class EmailGameMonitor:
         ]
         return f"{_format_sast(summary.started_at)} • Match started; " + ", ".join(status_bits)
 
-    def _render_match_summary(self, summary: MatchSummary, title: str, include_note: bool, compact_reminders: bool) -> str:
+    def _render_match_summary(
+        self,
+        summary: MatchSummary,
+        title: str,
+        include_note: bool,
+        compact_reminders: bool,
+        idle_note: bool = False,
+    ) -> str:
         lines = [title, ""]
+        lines.append(f"Latest completed match: <b>{html_escape(_format_sast(summary.started_at), quote=False)}</b>")
+        if idle_note:
+            lines.append("No newer match activity observed yet.")
         lines.append(f"{_format_sast(summary.started_at)} • Match started")
         lines.append("")
 
