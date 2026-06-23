@@ -1640,12 +1640,13 @@ class EmailGameMonitor:
         except OSError:
             return False
 
-    def _readiness_score(
+    def _operational_readiness_score(
         self,
         agent_running: bool,
         monitor_running: bool,
         identity_key_present: bool,
         log_stale: bool,
+        leaderboard_reachable: bool,
         analysis: object,
     ) -> Tuple[int, str]:
         score = 100
@@ -1662,15 +1663,60 @@ class EmailGameMonitor:
         if log_stale:
             score -= 15
             reasons.append("log stale")
-        if getattr(analysis, "rank", None) is None:
+        if not leaderboard_reachable:
+            score -= 10
+            reasons.append("leaderboard not reachable")
+        elif getattr(analysis, "rank", None) is None:
             score -= 5
             reasons.append("rank not visible")
-        if getattr(analysis, "score", None) is None:
+        elif getattr(analysis, "score", None) is None:
             score -= 5
             reasons.append("score not visible")
         score = max(0, min(100, score))
         if not reasons:
             return score, "Core runtime, monitor, key, log, and leaderboard checks look ready."
+        return score, "; ".join(reasons)
+
+    def _performance_readiness_score(
+        self,
+        analysis: object,
+        recent_reminders: int,
+        recent_submissions: int,
+        recent_signed_replies: int,
+    ) -> Tuple[int, str]:
+        score = 100
+        reasons: List[str] = []
+        deltas = getattr(analysis, "deltas", {})
+        if not isinstance(deltas, dict):
+            deltas = {}
+        known_deltas = [delta for delta in (deltas.get(15), deltas.get(30), deltas.get(60)) if delta is not None]
+        if known_deltas and all(int(delta) == 0 for delta in known_deltas):
+            score -= 5
+            reasons.append("score trend flat recently")
+        elif any(int(delta) < 0 for delta in known_deltas):
+            score -= 10
+            reasons.append("score trend declined recently")
+        if recent_reminders > 0:
+            score -= min(10, 3 + (recent_reminders * 2))
+            reasons.append("action reminders still present")
+        missed_submissions = max(0, recent_signed_replies - recent_submissions)
+        if missed_submissions > 0:
+            score -= min(10, 3 + (missed_submissions * 2))
+            reasons.append(f"{missed_submissions} signed replies lack matching submissions")
+        recommendation = str(getattr(analysis, "recommendation_title", "") or "")
+        if recommendation.lower().startswith("high:"):
+            score -= 10
+            reasons.append("coach has a high-priority recommendation")
+        elif recommendation.lower().startswith("medium:"):
+            score -= 5
+            reasons.append("coach has a medium-priority recommendation")
+        weaknesses = getattr(analysis, "weaknesses", [])
+        if isinstance(weaknesses, list) and "No recent matches parsed from local logs." in weaknesses:
+            score -= 10
+            reasons.append("no recent match evidence parsed")
+        score = max(0, min(100, score))
+        if not reasons:
+            return score, "Recent score trend, reminders, submissions, and coach signals look competition-ready."
         return score, "; ".join(reasons)
 
     def _readiness_text(self) -> str:
@@ -1686,12 +1732,21 @@ class EmailGameMonitor:
         recent_reminders = sum(match.total_reminders() for match in recent)
         recent_submissions = sum(match.total_submissions() for match in recent)
         recent_signed_replies = sum(match.total_signed_replies() for match in recent)
-        score, reason = self._readiness_score(
+        data, leaderboard_error = self._fetch_leaderboard_data()
+        leaderboard_reachable = data is not None
+        operational_score, operational_reason = self._operational_readiness_score(
             agent_running,
             monitor_running,
             identity_key_present,
             bool(log_status.stale or analysis.latest_log_stale),
+            leaderboard_reachable,
             analysis,
+        )
+        performance_score, performance_reason = self._performance_readiness_score(
+            analysis,
+            recent_reminders,
+            recent_submissions,
+            recent_signed_replies,
         )
         start_sast = COMPETITION_START_ET.astimezone(SAST_TZ)
         end_sast = COMPETITION_END_ET.astimezone(SAST_TZ)
@@ -1705,6 +1760,7 @@ class EmailGameMonitor:
             f"Agent process running: <b>{'yes' if agent_running else 'no'}</b>",
             f"Monitor running: <b>{'yes' if monitor_running else 'no'}</b>",
             "Coach running/integrated: <b>yes</b>",
+            f"Leaderboard reachable: <b>{'yes' if leaderboard_reachable else 'no'}</b>",
             f"Branch: <code>{html_escape(branch, quote=False)}</code>",
             f"Commit: <code>{html_escape(commit, quote=False)}</code>",
             f"Model: <code>{html_escape(model, quote=False)}</code>",
@@ -1724,9 +1780,14 @@ class EmailGameMonitor:
             f"Log stale: <b>{'yes' if log_status.stale or analysis.latest_log_stale else 'no'}</b>",
             f"Latest coach recommendation: <b>{html_escape(analysis.recommendation_title, quote=False)}</b>",
             "",
-            f"Readiness score: <b>{score}/100</b>",
-            html_escape(reason, quote=False),
+            f"Operational readiness: <b>{operational_score}/100</b>",
+            html_escape(operational_reason, quote=False),
+            "",
+            f"Competition performance readiness: <b>{performance_score}/100</b>",
+            html_escape(performance_reason, quote=False),
         ]
+        if not leaderboard_reachable and leaderboard_error:
+            lines.append(f"Leaderboard error: <code>{html_escape(_clean_log_text(leaderboard_error), quote=False)}</code>")
         return "\n".join(lines)
 
     def _fetch_leaderboard_snapshot(self) -> Tuple[Optional[Dict[str, object]], str]:
