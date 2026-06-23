@@ -72,6 +72,9 @@ OPENAI_STYLE_TOKEN_RE = re.compile(r"\bsk-[A-Za-z0-9._-]{6,}\b")
 ELLIPSIZED_TOKEN_RE = re.compile(r"\bsk-[A-Za-z0-9._-]{3,}\.\.\.[A-Za-z0-9._-]{2,}\b")
 SEPARATOR_RE = re.compile(r"^[\s\-_=─━│┄┅┆┇┈┉┊┋╌╍╴╶╼╾]+$")
 SAST_TZ = ZoneInfo("Africa/Johannesburg") if ZoneInfo is not None else timezone(timedelta(hours=2))
+ET_TZ = ZoneInfo("America/New_York") if ZoneInfo is not None else timezone(timedelta(hours=-4))
+COMPETITION_START_ET = datetime(2026, 6, 27, 11, 0, tzinfo=ET_TZ)
+COMPETITION_END_ET = datetime(2026, 6, 27, 17, 0, tzinfo=ET_TZ)
 
 load_dotenv(PROJECT_ROOT / ".env.local")
 
@@ -127,6 +130,30 @@ def _now_sast() -> datetime:
 
 def _format_sast(dt: Optional[datetime] = None) -> str:
     return (dt or _now_sast()).astimezone(SAST_TZ).strftime("%H:%M SAST")
+
+
+def _format_countdown(target: datetime, now: Optional[datetime] = None) -> str:
+    current = now or datetime.now(tz=target.tzinfo)
+    remaining = target - current.astimezone(target.tzinfo)
+    if remaining.total_seconds() <= 0:
+        return "started"
+    total_seconds = int(remaining.total_seconds())
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or days:
+        parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+
+def _score_delta_text(delta: Optional[int]) -> str:
+    if delta is None:
+        return "n/a"
+    return f"{delta:+d}"
 
 
 def _parse_sast(value: object) -> Optional[datetime]:
@@ -976,7 +1003,13 @@ class EmailGameMonitor:
         if command == "/tail":
             return self._tail_text(args)
         if command == "/leaderboard":
-            return self._leaderboard_text()
+            return self._leaderboard_text(args)
+        if command == "/rank":
+            return self._rank_text()
+        if command == "/participants":
+            return self._participants_text()
+        if command == "/readiness":
+            return self._readiness_text()
         if command == "/reconnectlog":
             return self._reconnect_log_text()
         if command in ("/why", "/reminders"):
@@ -1016,6 +1049,10 @@ class EmailGameMonitor:
             "/reminders — same as /why\n"
             "/tail — raw redacted tail\n"
             "/leaderboard — current ranking\n"
+            "/leaderboard full — full ranking if exposed\n"
+            "/rank — my rank and gaps\n"
+            "/participants — leaderboard visibility\n"
+            "/readiness — competition readiness report\n"
             "/coach — concise performance analysis\n"
             "/recommend — next recommended Codex goal\n"
             "/reviewmatch — latest match diagnosis\n"
@@ -1401,24 +1438,82 @@ class EmailGameMonitor:
         finished = any("Game over - between matches now" in entry.text for entry in recent)
         return has_game and not finished
 
-    def _leaderboard_text(self) -> str:
+    def _fetch_leaderboard_data(self) -> Tuple[Optional[Dict[str, object]], str]:
         if not self._server_url:
-            return "EMAIL_GAME_SERVER is not set, so I cannot fetch the leaderboard."
+            return None, "EMAIL_GAME_SERVER is not set"
         url = self._server_url.rstrip("/") + "/api/leaderboard/testing"
         try:
             with urlopen(url, timeout=20) as response:
                 data = json.loads(response.read().decode("utf-8", "replace"))
         except Exception as exc:
-            return f"Failed to fetch testing leaderboard: {exc}"
+            return None, str(exc)
+        if not isinstance(data, dict):
+            return None, "Testing leaderboard response was malformed"
+        entries = data.get("leaderboard")
+        if not isinstance(entries, list):
+            return None, "Testing leaderboard response was malformed"
+        return data, ""
 
+    def _leaderboard_entries(self, data: Dict[str, object]) -> List[Dict[str, object]]:
         entries = data.get("leaderboard") if isinstance(data, dict) else None
         if not isinstance(entries, list):
-            return "Testing leaderboard response was malformed."
+            return []
+        return [entry for entry in entries if isinstance(entry, dict)]
 
+    def _my_leaderboard_entry(self, entries: List[Dict[str, object]]) -> Optional[Dict[str, object]]:
+        return next((entry for entry in entries if entry.get("agent_id") == self._agent_name), None)
+
+    def _entry_rank(self, entry: Optional[Dict[str, object]]) -> Optional[int]:
+        if not isinstance(entry, dict):
+            return None
+        raw = str(entry.get("rank") or "").strip()
+        return int(raw) if raw.isdigit() else None
+
+    def _entry_score(self, entry: Optional[Dict[str, object]]) -> Optional[int]:
+        if not isinstance(entry, dict):
+            return None
+        raw = str(entry.get("elo") or "").strip()
+        return int(raw) if raw.lstrip("-").isdigit() else None
+
+    def _gap_to_next_visible_rank(self, entries: List[Dict[str, object]], me: Optional[Dict[str, object]]) -> str:
+        my_rank = self._entry_rank(me)
+        my_score = self._entry_score(me)
+        if my_rank is None or my_score is None:
+            return "n/a"
+        better = [
+            entry
+            for entry in entries
+            if self._entry_rank(entry) is not None
+            and self._entry_score(entry) is not None
+            and self._entry_rank(entry) < my_rank
+        ]
+        if not better:
+            return "0"
+        next_entry = max(better, key=lambda entry: self._entry_rank(entry) or 0)
+        next_score = self._entry_score(next_entry)
+        if next_score is None:
+            return "n/a"
+        return str(max(next_score - my_score, 0))
+
+    def _leaderboard_text(self, args: Optional[List[str]] = None) -> str:
+        data, error = self._fetch_leaderboard_data()
+        if data is None:
+            return f"Failed to fetch testing leaderboard: {error}"
+        entries = self._leaderboard_entries(data)
+        full_requested = bool(args and args[0].lower() == "full")
         top = [entry for entry in entries[:5] if isinstance(entry, dict)]
-        me = next((e for e in entries if isinstance(e, dict) and e.get("agent_id") == self._agent_name), None)
-        lines = ["🏆 <b>Testing Leaderboard</b>", ""]
-        for entry in top:
+        me = self._my_leaderboard_entry(entries)
+        if full_requested:
+            lines = ["🏆 <b>Testing Leaderboard Full</b>", ""]
+            if len(entries) <= 5:
+                lines.append("Server currently exposes only Top 5 to this parser/source.")
+                lines.append("")
+            display = entries
+        else:
+            lines = ["🏆 <b>Testing Leaderboard</b>", ""]
+            display = top
+
+        for entry in display:
             rank = html_escape(str(entry.get("rank", "?")), quote=False)
             agent_id_raw = str(entry.get("agent_id", "unknown"))
             agent_id = html_escape(self._leaderboard_agent_label(agent_id_raw), quote=False)
@@ -1448,22 +1543,200 @@ class EmailGameMonitor:
             lines.extend(["", f"Your agent: <b>{html_escape(self._agent_name, quote=False)}</b> not visible on the board"])
         return "\n".join(lines)
 
-    def _fetch_leaderboard_snapshot(self) -> Tuple[Optional[Dict[str, object]], str]:
-        if not self._server_url:
-            return None, "EMAIL_GAME_SERVER is not set"
-        url = self._server_url.rstrip("/") + "/api/leaderboard/testing"
-        try:
-            with urlopen(url, timeout=20) as response:
-                data = json.loads(response.read().decode("utf-8", "replace"))
-        except Exception as exc:
-            return None, str(exc)
+    def _rank_text(self) -> str:
+        data, error = self._fetch_leaderboard_data()
+        if data is None:
+            return f"Failed to fetch rank: {error}"
+        entries = self._leaderboard_entries(data)
+        me = self._my_leaderboard_entry(entries)
+        if not isinstance(me, dict):
+            return (
+                "📍 <b>Email Game Rank</b>\n\n"
+                f"Agent: <code>{html_escape(self._agent_name, quote=False)}</code>\n"
+                "Rank: <b>not visible</b>\n"
+                "Score: <b>n/a</b>\n"
+                "Server currently exposes only Top 5 to this parser/source."
+            )
 
-        entries = data.get("leaderboard") if isinstance(data, dict) else None
-        if not isinstance(entries, list):
-            return None, "Testing leaderboard response was malformed"
+        rank = str(me.get("rank", "?"))
+        score = str(me.get("elo", "?"))
+        gap_next = self._gap_to_next_visible_rank(entries, me)
+        gap_one = self._leaderboard_gap_to_rank(entries, 1, me)
+        leader = next((entry for entry in entries if self._entry_rank(entry) == 1), None)
+        leader_label = self._leaderboard_agent_label(str(leader.get("agent_id") or "unknown")) if isinstance(leader, dict) else "n/a"
+        one_moved = "unknown"
+        previous_top = []
+        if isinstance(self.leaderboard_state.last_snapshot, dict):
+            previous_top_raw = self.leaderboard_state.last_snapshot.get("top5")
+            if isinstance(previous_top_raw, list):
+                previous_top = [entry for entry in previous_top_raw if isinstance(entry, dict)]
+        previous_leader = next((entry for entry in previous_top if self._entry_rank(entry) == 1), None)
+        if isinstance(leader, dict) and isinstance(previous_leader, dict):
+            one_moved = "yes" if (
+                leader.get("agent_id") != previous_leader.get("agent_id")
+                or str(leader.get("elo")) != str(previous_leader.get("elo"))
+            ) else "no"
+
+        return "\n".join(
+            [
+                "📍 <b>Email Game Rank</b>",
+                "",
+                f"Your rank: <b>#{html_escape(rank, quote=False)}</b>",
+                f"Your score: <b>{html_escape(score, quote=False)}</b>",
+                f"Gap to next visible rank: <b>{html_escape(gap_next, quote=False)}</b>",
+                f"Gap to #1: <b>{html_escape(gap_one, quote=False)}</b>",
+                f"#1: <b>{html_escape(leader_label, quote=False)}</b>",
+                f"#1 moved recently: <b>{html_escape(one_moved, quote=False)}</b>",
+            ]
+        )
+
+    def _participants_text(self) -> str:
+        data, error = self._fetch_leaderboard_data()
+        if data is None:
+            return f"Failed to fetch participants: {error}"
+        entries = self._leaderboard_entries(data)
+        live = data.get("live") if isinstance(data, dict) else {}
+        if not isinstance(live, dict):
+            live = {}
+        total = len(entries)
+        house_count = sum(1 for entry in entries if str(entry.get("agent_id") or "") in HOUSE_BOT_IDS)
+        human_count = total - house_count
+        visible_agents = ", ".join(
+            self._leaderboard_agent_label(str(entry.get("agent_id") or "unknown"))
+            for entry in entries[:5]
+        ) or "none"
+        full_exposed = "yes" if total > 5 else "no"
+        visibility_note = (
+            "Server currently exposes only Top 5 to this parser/source."
+            if total <= 5
+            else "Server exposes more than Top 5 to this parser/source."
+        )
+        lines = [
+            "👥 <b>Email Game Participants</b>",
+            "",
+            f"Full leaderboard exposed: <b>{full_exposed}</b>",
+            f"Total listed agents: <b>{html_escape(str(total), quote=False)}</b>",
+            f"Visible agents: <b>{html_escape(str(min(total, 5)), quote=False)}</b>",
+            f"House bots: <b>{html_escape(str(house_count), quote=False)}</b>",
+            f"Likely human participants: <b>{html_escape(str(human_count), quote=False)}</b>",
+            f"Online: <b>{html_escape(str(live.get('players', 'n/a')), quote=False)}</b>",
+            f"In match: <b>{html_escape(str(live.get('in_game', 'n/a')), quote=False)}</b>",
+            f"Waiting: <b>{html_escape(str(live.get('queued', 'n/a')), quote=False)}</b>",
+            "",
+            visibility_note,
+            "",
+            f"Visible list: {html_escape(visible_agents, quote=False)}",
+        ]
+        return "\n".join(lines)
+
+    def _identity_key_present(self) -> bool:
+        key_dir = Path.home() / ".email_game" / "keys"
+        if not key_dir.exists():
+            return False
+        if key_dir.is_file():
+            return True
+        try:
+            return any(item.is_file() for item in key_dir.iterdir())
+        except OSError:
+            return False
+
+    def _readiness_score(
+        self,
+        agent_running: bool,
+        monitor_running: bool,
+        identity_key_present: bool,
+        log_stale: bool,
+        analysis: object,
+    ) -> Tuple[int, str]:
+        score = 100
+        reasons: List[str] = []
+        if not agent_running:
+            score -= 30
+            reasons.append("agent not running")
+        if not monitor_running:
+            score -= 20
+            reasons.append("monitor not running")
+        if not identity_key_present:
+            score -= 25
+            reasons.append("identity key missing")
+        if log_stale:
+            score -= 15
+            reasons.append("log stale")
+        if getattr(analysis, "rank", None) is None:
+            score -= 5
+            reasons.append("rank not visible")
+        if getattr(analysis, "score", None) is None:
+            score -= 5
+            reasons.append("score not visible")
+        score = max(0, min(100, score))
+        if not reasons:
+            return score, "Core runtime, monitor, key, log, and leaderboard checks look ready."
+        return score, "; ".join(reasons)
+
+    def _readiness_text(self) -> str:
+        log_status = self._check_log_stream(reconnect=False, refresh_capture=True)
+        agent_running = self._agent_process_running()
+        monitor_running = _process_running_pattern(r"scripts/monitor_emailgame_telegram.py")
+        identity_key_present = self._identity_key_present()
+        branch = self._branch_text()
+        commit = self._commit_text()
+        model = self._configured_model()
+        analysis = self._coach().analyze(persist=True)
+        recent = analysis.matches[-3:]
+        recent_reminders = sum(match.total_reminders() for match in recent)
+        recent_submissions = sum(match.total_submissions() for match in recent)
+        recent_signed_replies = sum(match.total_signed_replies() for match in recent)
+        score, reason = self._readiness_score(
+            agent_running,
+            monitor_running,
+            identity_key_present,
+            bool(log_status.stale or analysis.latest_log_stale),
+            analysis,
+        )
+        start_sast = COMPETITION_START_ET.astimezone(SAST_TZ)
+        end_sast = COMPETITION_END_ET.astimezone(SAST_TZ)
+        lines = [
+            "✅ <b>Competition Readiness</b>",
+            "",
+            f"Official window ET: <b>{COMPETITION_START_ET.strftime('%Y-%m-%d %H:%M')}–{COMPETITION_END_ET.strftime('%H:%M %Z')}</b>",
+            f"Official window SAST: <b>{start_sast.strftime('%Y-%m-%d %H:%M')}–{end_sast.strftime('%H:%M %Z')}</b>",
+            f"Countdown to start: <b>{html_escape(_format_countdown(COMPETITION_START_ET), quote=False)}</b>",
+            "",
+            f"Agent process running: <b>{'yes' if agent_running else 'no'}</b>",
+            f"Monitor running: <b>{'yes' if monitor_running else 'no'}</b>",
+            "Coach running/integrated: <b>yes</b>",
+            f"Branch: <code>{html_escape(branch, quote=False)}</code>",
+            f"Commit: <code>{html_escape(commit, quote=False)}</code>",
+            f"Model: <code>{html_escape(model, quote=False)}</code>",
+            f"Identity key location check: <b>{'present yes' if identity_key_present else 'present no'}</b>",
+            "One-machine rule: <b>run from the Oracle VM only</b>",
+            "",
+            f"Current rank/score: <b>{'#' + str(analysis.rank) if analysis.rank is not None else 'n/a'} / {analysis.score if analysis.score is not None else 'n/a'}</b>",
+            f"15m score trend: <b>{html_escape(_score_delta_text(analysis.deltas.get(15)), quote=False)}</b>",
+            f"30m score trend: <b>{html_escape(_score_delta_text(analysis.deltas.get(30)), quote=False)}</b>",
+            f"60m score trend: <b>{html_escape(_score_delta_text(analysis.deltas.get(60)), quote=False)}</b>",
+            f"Gap to #4: <b>{analysis.gap_to_four if analysis.gap_to_four is not None else 'n/a'}</b>",
+            f"Gap to #1: <b>{analysis.gap_to_one if analysis.gap_to_one is not None else 'n/a'}</b>",
+            "",
+            f"Recent reminders: <b>{html_escape(str(recent_reminders), quote=False)}</b>",
+            f"Recent submissions: <b>{html_escape(str(recent_submissions), quote=False)}</b>",
+            f"Recent signed replies: <b>{html_escape(str(recent_signed_replies), quote=False)}</b>",
+            f"Log stale: <b>{'yes' if log_status.stale or analysis.latest_log_stale else 'no'}</b>",
+            f"Latest coach recommendation: <b>{html_escape(analysis.recommendation_title, quote=False)}</b>",
+            "",
+            f"Readiness score: <b>{score}/100</b>",
+            html_escape(reason, quote=False),
+        ]
+        return "\n".join(lines)
+
+    def _fetch_leaderboard_snapshot(self) -> Tuple[Optional[Dict[str, object]], str]:
+        data, error = self._fetch_leaderboard_data()
+        if data is None:
+            return None, error
+        entries = self._leaderboard_entries(data)
 
         top5 = [entry for entry in entries[:5] if isinstance(entry, dict)]
-        me = next((entry for entry in entries if isinstance(entry, dict) and entry.get("agent_id") == self._agent_name), None)
+        me = self._my_leaderboard_entry(entries)
         if not isinstance(me, dict):
             me = {}
 

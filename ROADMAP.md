@@ -14,7 +14,7 @@ Record these as fixed operating constraints for future work:
 - Use one agent per person.
 - Keep keys and credentials out of public Discord channels.
 - Build-week leaderboard checks use `/leaderboard/testing`.
-- The official competition runs June 27, 11 AM-5 PM ET.
+- The official competition runs June 27, 2026, 11 AM-5 PM ET, which is 17:00-23:00 SAST.
 - House bots are deployed by organizers for build-week matches.
 - Pull repo updates carefully with `git pull`; protect `my_agent.py` and local config files.
 
@@ -24,6 +24,17 @@ Strategy notes:
 - Use house bots to test signature collection, signing, and submission flow.
 - Expect real participants to phrase requests and coordinate differently.
 - Continue tracking score, rank, and gaps through the Telegram coach.
+
+## Competition Readiness Bot Commands
+
+Implemented Telegram readiness commands should stay read-only and operationally safe:
+
+- `/readiness`: competition time, countdown, process status, coach integration, branch, commit, model, identity key presence, rank, score, trends, gaps, recent reminders, recent submissions, recent signed replies, stale-log state, coach recommendation, and readiness score.
+- `/rank`: compact personal rank, score, gap to next visible rank, gap to `#1`, and whether `#1` moved recently when known.
+- `/participants`: full-leaderboard visibility, total listed agents if exposed, visible agents, house bot count, likely human count, and live online/in-match/waiting counts when the server provides them.
+- `/leaderboard full`: all rows returned by the current server source; if the source only returns Top 5, say that clearly.
+
+Leaderboard visibility should not be guessed. If the public source exposes only Top 5, local reports should say only Top 5 is exposed to this parser/source and should not invent hidden participant totals.
 
 ## Telegram Mini App Dashboard
 

@@ -33,6 +33,10 @@ Primary Telegram commands:
 - `/logs`
 - `/tail`
 - `/leaderboard`
+- `/leaderboard full`
+- `/rank`
+- `/participants`
+- `/readiness`
 - `/preflight`
 - `/version`
 - `/startagent`
@@ -86,9 +90,31 @@ Operational rules:
 - Use one agent per person.
 - Keep keys and credentials out of public Discord channels.
 - Build-week leaderboard checks use `/leaderboard/testing`.
-- The official competition runs June 27, 11 AM-5 PM ET.
+- The official competition runs June 27, 2026, 11 AM-5 PM ET, which is 17:00-23:00 SAST.
 - House bots are deployed by organizers for build-week matches.
 - Pull repo updates carefully with `git pull`; protect `my_agent.py` and local config files before accepting upstream changes.
+
+## Competition Readiness
+
+Use `/readiness` in Telegram before the official competition and after monitor changes.
+
+It reports:
+- official competition window in ET and SAST
+- countdown to start
+- agent and monitor process status
+- coach integration status
+- branch, commit, and model
+- identity key presence at `~/.email_game/keys` without printing the key
+- Oracle VM one-machine reminder
+- current rank, score, gaps, and score trends
+- recent reminders, submissions, signed replies, stale-log state, and coach recommendation
+- a 0-100 readiness score with a short reason
+
+Use `/rank` for the compact rank and gap view.
+
+Use `/participants` to check leaderboard visibility. If the server response only exposes the visible Top 5, the bot says that clearly and does not invent totals.
+
+Use `/leaderboard full` to show every entry returned by the server source. If that source only returns Top 5, it reports: `Server currently exposes only Top 5 to this parser/source.`
 
 ## Safety Rules
 
@@ -195,10 +221,12 @@ Recent observed state:
 
 ## Recommended Operating Loop
 
-1. Check `/status`.
-2. Check `/leaderboard`.
-3. Use `/coach` or `/recommend` for summarized next actions.
-4. Use `/reviewmatch` after recent matches.
-5. Use `/metrics` when investigating repeated reminders or missed submissions.
-6. Restart only the monitor after monitor-only code changes.
-7. Restart the agent only between matches.
+1. Check `/readiness`.
+2. Check `/status`.
+3. Check `/leaderboard` and `/rank`.
+4. Use `/participants` or `/leaderboard full` when leaderboard visibility is unclear.
+5. Use `/coach` or `/recommend` for summarized next actions.
+6. Use `/reviewmatch` after recent matches.
+7. Use `/metrics` when investigating repeated reminders or missed submissions.
+8. Restart only the monitor after monitor-only code changes.
+9. Restart the agent only between matches.

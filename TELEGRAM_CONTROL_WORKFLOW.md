@@ -40,6 +40,10 @@ This helper must not print the Telegram bot token.
 - `/logs`: recent redacted log summary
 - `/tail`: redacted live log tail
 - `/leaderboard`: latest score, rank, and gaps
+- `/leaderboard full`: every ranking row returned by the server source
+- `/rank`: compact rank, score, and gap view
+- `/participants`: leaderboard visibility and participant counts from public data
+- `/readiness`: official competition readiness report
 - `/preflight`: safe local preflight check
 - `/version`: running branch, commit, and version context
 - `/startagent`: start the agent if stopped
@@ -78,11 +82,19 @@ Scoring:
 Build-week and competition notes:
 
 - Build-week leaderboard checks use `/leaderboard/testing`.
-- The official competition runs June 27, 11 AM-5 PM ET.
+- The official competition runs June 27, 2026, 11 AM-5 PM ET, which is 17:00-23:00 SAST.
 - House bots are deployed by organizers for build-week matches.
 - Run from one machine because the identity key is stored in `~/.email_game/keys`.
 - Use one agent per person.
 - Pull repo updates carefully with `git pull`; protect `my_agent.py` and local config files before accepting upstream changes.
+
+## Readiness Report
+
+Use `/readiness` before the official competition and after monitor-only changes.
+
+The report is read-only. It checks process status, coach integration, branch, commit, model, identity key presence, current rank and score, 15m/30m/60m trends, gaps to `#4` and `#1`, recent reminders, recent submissions, recent signed replies, stale-log state, and the latest coach recommendation.
+
+The identity check only reports whether `~/.email_game/keys` exists and contains a key file. It must never print key contents.
 
 ## Monitor Connected Notification
 
@@ -100,11 +112,21 @@ If the connected message repeats, check whether the monitor process is actually 
 
 Recommended loop:
 
-1. Use `/leaderboard` to check rank, score, and gaps.
-2. Use `/coach` for the current summary.
-3. Use `/recommend` before changing code or restarting anything.
-4. Use `/reviewmatch` after recent matches.
-5. Use `/metrics` when investigating reminders or missed submissions.
+1. Use `/readiness` for competition readiness.
+2. Use `/leaderboard` to check rank, score, and gaps.
+3. Use `/rank` for the compact rank and gap view.
+4. Use `/participants` to check whether the server exposes the full board or only the visible Top 5.
+5. Use `/leaderboard full` to show every ranking row returned by the server source.
+6. Use `/coach` for the current summary.
+7. Use `/recommend` before changing code or restarting anything.
+8. Use `/reviewmatch` after recent matches.
+9. Use `/metrics` when investigating reminders or missed submissions.
+
+Current leaderboard visibility behavior:
+- `/rank` and `/leaderboard` use `/api/leaderboard/testing`.
+- `/leaderboard full` shows all rows returned by that API.
+- If the source returns only Top 5, the bot says `Server currently exposes only Top 5 to this parser/source.`
+- `/participants` reports visible counts only and does not invent hidden totals.
 
 Recent known performance:
 - rank around `#5`
