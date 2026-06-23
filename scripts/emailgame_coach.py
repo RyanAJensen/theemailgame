@@ -41,6 +41,7 @@ MAX_LOG_BYTES = 1_500_000
 MAX_HISTORY = 400
 MAX_MATCHES = 12
 ALERT_COOLDOWN_SECONDS = 600
+LOG_STALE_ALERT_COOLDOWN_SECONDS = 900
 
 WATCH_URL_RE = re.compile(r"https?://(?:www\.)?the-email-game\.fly\.dev/watch\?[^\s<>\"]+", re.IGNORECASE)
 TOKEN_KV_RE = re.compile(r"(token=)[^\s&<>\"]+", re.IGNORECASE)
@@ -51,6 +52,8 @@ SENSITIVE_KV_RE = re.compile(
 )
 JWT_RE = re.compile(r"\beyJ[A-Za-z0-9._-]+\b")
 OPENAI_TOKEN_RE = re.compile(r"\bsk-[A-Za-z0-9._-]{6,}\b")
+URLSAFE_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_-]{32,}\b")
+TERMINAL_KEY_MASH_RE = re.compile(r"(?:\^\[\[[0-9;]*[A-Za-z])+")
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -76,12 +79,14 @@ def _fmt_dt(value: Optional[datetime]) -> str:
 
 def _redact(text: str) -> str:
     text = text.replace("\r", "")
+    text = TERMINAL_KEY_MASH_RE.sub("", text)
     text = ANSI_RE.sub("", text)
     text = WATCH_URL_RE.sub("[watch link redacted]", text)
     text = TOKEN_KV_RE.sub(r"\1[redacted]", text)
     text = SENSITIVE_KV_RE.sub(r"\1[redacted]", text)
     text = JWT_RE.sub("[jwt redacted]", text)
     text = OPENAI_TOKEN_RE.sub("[redacted]", text)
+    text = URLSAFE_TOKEN_RE.sub("[redacted-token]", text)
     return text
 
 
@@ -258,6 +263,7 @@ class EmailGameCoach:
 
     def telegram_coach_text(self) -> str:
         analysis = self.analyze(persist=True)
+        fresh_activity = self._has_fresh_match_activity(analysis.matches[-3:])
         if analysis.latest_log_stale:
             lines = [
                 "Email Game Coach",
@@ -268,7 +274,22 @@ class EmailGameCoach:
                 f"Gap to #1: {analysis.gap_to_one if analysis.gap_to_one is not None else 'n/a'}",
                 "",
                 "Monitoring stale: yes",
-                "Diagnosis: local match summaries are withheld until the live log stream is fresh.",
+                "Diagnosis: No fresh match activity; agent appears waiting.",
+                "",
+                "Next recommendation:",
+                analysis.recommendation_title,
+            ]
+            return self._html(lines)
+        if not fresh_activity:
+            lines = [
+                "Email Game Coach",
+                "",
+                f"Rank: #{analysis.rank}" if analysis.rank is not None else "Rank: n/a",
+                f"Score trend: {_score_delta_text(analysis.deltas.get(30))} in 30m",
+                f"Gap to #4: {analysis.gap_to_four if analysis.gap_to_four is not None else 'n/a'}",
+                f"Gap to #1: {analysis.gap_to_one if analysis.gap_to_one is not None else 'n/a'}",
+                "",
+                "Diagnosis: No fresh match activity; agent appears waiting.",
                 "",
                 "Next recommendation:",
                 analysis.recommendation_title,
@@ -391,15 +412,22 @@ class EmailGameCoach:
         if isinstance(last_alert, dict):
             last_key = str(last_alert.get("key") or "")
             last_at = float(last_alert.get("at") or 0)
-            if last_key == alert_key and now_ts - last_at < ALERT_COOLDOWN_SECONDS:
+            cooldown = LOG_STALE_ALERT_COOLDOWN_SECONDS if alert_key == "log_stale" else ALERT_COOLDOWN_SECONDS
+            if last_key == alert_key and now_ts - last_at < cooldown:
                 _write_json(self.coach_state_file, self.state)
                 return None
-            if now_ts - last_at < ALERT_COOLDOWN_SECONDS and alert_key not in {"disconnect", "log_stale"}:
+            if now_ts - last_at < ALERT_COOLDOWN_SECONDS and alert_key != "disconnect":
                 _write_json(self.coach_state_file, self.state)
                 return None
 
         self.state["last_alert"] = {"key": alert_key, "at": now_ts, "reason": alert_reason}
         _write_json(self.coach_state_file, self.state)
+        if alert_key == "log_stale":
+            recommendation_title = "High: restore monitor log freshness"
+            recommendation_goal = "email-game-restore-monitor-log-stream"
+        else:
+            recommendation_title = analysis.recommendation_title
+            recommendation_goal = analysis.recommendation_goal
         return self._html(
             [
                 "Email Game Coach Recommendation",
@@ -410,8 +438,8 @@ class EmailGameCoach:
                 f"30m trend: {_score_delta_text(analysis.deltas.get(30))}",
                 "",
                 "Recommendation:",
-                analysis.recommendation_title,
-                analysis.recommendation_goal,
+                recommendation_title,
+                recommendation_goal,
             ]
         )
 
@@ -822,8 +850,12 @@ class EmailGameCoach:
     def _detect_weaknesses(self, matches: List[MatchMetrics], latest_log_stale: bool) -> List[str]:
         weaknesses: List[str] = []
         recent = matches[-3:]
+        fresh_activity = self._has_fresh_match_activity(recent)
         if latest_log_stale:
             weaknesses.append("Monitor log stream is stale.")
+        if latest_log_stale or not fresh_activity:
+            weaknesses.append("No fresh match activity; agent appears waiting.")
+            return weaknesses
         if not recent:
             weaknesses.append("No recent matches parsed from local logs.")
             return weaknesses
@@ -882,12 +914,21 @@ class EmailGameCoach:
     ) -> Tuple[str, str, str, List[str]]:
         recent = matches[-3:]
         evidence: List[str] = []
+        fresh_activity = self._has_fresh_match_activity(recent)
         if latest_log_stale:
             return (
                 "High: restore monitor log freshness",
                 "The coach cannot trust stale logs.",
                 "email-game-restore-monitor-log-stream",
                 ["Log stream is stale according to file mtime."],
+            )
+
+        if not fresh_activity:
+            return (
+                "Low: continue monitoring before agent edits",
+                "No fresh match activity; agent appears waiting.",
+                "email-game-continue-performance-monitoring",
+                ["No fresh match activity is available to justify a code change."],
             )
 
         signed_without_submitted = sum(
@@ -956,8 +997,27 @@ class EmailGameCoach:
             evidence,
         )
 
+    def _has_fresh_match_activity(self, matches: List[MatchMetrics]) -> bool:
+        latest_activity: Optional[datetime] = None
+        for match in matches:
+            for ts in (match.ended_at, match.started_at):
+                if ts is None:
+                    continue
+                if latest_activity is None or ts > latest_activity:
+                    latest_activity = ts
+        if latest_activity is None:
+            return False
+        return (_now() - latest_activity).total_seconds() <= 300
+
     def _alert_condition(self, analysis: CoachAnalysis, reason: str) -> Tuple[str, str]:
         history = self._leaderboard_history()
+        recent = analysis.matches[-2:]
+        if analysis.latest_log_stale or reason == "log_stale":
+            return "log_stale", "Monitor log stream is stale."
+        if reason == "disconnect" or any(match.disconnects for match in recent):
+            return "disconnect", "Agent disconnect event observed."
+        if not self._has_fresh_match_activity(analysis.matches[-3:]):
+            return "", ""
         if len(history) >= 2:
             current = history[-1]
             previous = history[-2]
@@ -972,15 +1032,10 @@ class EmailGameCoach:
             if current_score is not None and previous_score is not None and current_score - previous_score >= 20:
                 return "score_improved", f"Score improved {current_score - previous_score} after recent changes."
 
-        recent = analysis.matches[-2:]
         if len(recent) >= 2 and all(match.total_reminders() > 0 for match in recent):
             return "consecutive_reminders", "Action reminders appeared in 2 consecutive matches."
         if len(recent) >= 2 and all(match.total_submissions() == 0 for match in recent):
             return "no_submissions", "No signature submissions were observed for 2 consecutive matches."
-        if reason == "disconnect" or any(match.disconnects for match in recent):
-            return "disconnect", "Agent disconnect event observed."
-        if analysis.latest_log_stale or reason == "log_stale":
-            return "log_stale", "Monitor log stream is stale."
         return "", ""
 
     def _html(self, lines: Iterable[str]) -> str:

@@ -94,6 +94,8 @@ SENSITIVE_KV_RE = re.compile(
 )
 OPENAI_STYLE_TOKEN_RE = re.compile(r"\bsk-[A-Za-z0-9._-]{6,}\b")
 ELLIPSIZED_TOKEN_RE = re.compile(r"\bsk-[A-Za-z0-9._-]{3,}\.\.\.[A-Za-z0-9._-]{2,}\b")
+URLSAFE_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_-]{32,}\b")
+TERMINAL_KEY_MASH_RE = re.compile(r"(?:\^\[\[[0-9;]*[A-Za-z])+")
 SEPARATOR_RE = re.compile(r"^[\s\-_=─━│┄┅┆┇┈┉┊┋╌╍╴╶╼╾]+$")
 SAST_TZ = ZoneInfo("Africa/Johannesburg") if ZoneInfo is not None else timezone(timedelta(hours=2))
 ET_TZ = ZoneInfo("America/New_York") if ZoneInfo is not None else timezone(timedelta(hours=-4))
@@ -113,6 +115,7 @@ def _env(*names: str) -> str:
 
 def _redact(text: str) -> str:
     text = text.replace("\r", "")
+    text = TERMINAL_KEY_MASH_RE.sub("", text)
     text = OSC8_LINK_RE.sub("", text)
     text = OSC_TERMINATOR_RE.sub("", text)
     text = ANSI_ESCAPE_RE.sub("", text)
@@ -121,6 +124,7 @@ def _redact(text: str) -> str:
     text = SENSITIVE_KV_RE.sub(r"\1[redacted]", text)
     text = ELLIPSIZED_TOKEN_RE.sub("[redacted]", text)
     text = OPENAI_STYLE_TOKEN_RE.sub("[redacted]", text)
+    text = URLSAFE_TOKEN_RE.sub("[redacted-token]", text)
     text = re.sub(r"(Authorization:\s*Bearer\s+)[^\s<>\"]+", r"\1[redacted]", text, flags=re.IGNORECASE)
     return text
 
@@ -1225,7 +1229,7 @@ class EmailGameMonitor:
 
         if size == self.state.log_offset:
             status = self._check_log_stream(reconnect=True, refresh_capture=True)
-            if status.stale:
+            if status.stale and self._derive_phase() not in {"waiting", "between matches"}:
                 self._maybe_send_coach_alert("log_stale")
             return
 
@@ -1626,6 +1630,7 @@ class EmailGameMonitor:
             entry
             for entry in lines
             if not SEPARATOR_RE.match(entry.text)
+            and entry.text.strip() not in {"^[[A", "^[[B", "^[[C", "^[[D"}
             and "Watch your match" not in entry.text
             and "View leaderboard" not in entry.text
             and "the-email-game.fly.dev/leaderboard/testing" not in entry.text
@@ -1809,8 +1814,8 @@ class EmailGameMonitor:
         waiting_alone = self._waiting_alone()
         source = "live log file" if not log_status.file_stale else ("tmux pane capture" if log_status.pane_observed else "stale log file")
         warning_lines: List[str] = []
-        if idle_waiting:
-            warning_lines.append("No new match activity; agent is waiting for another match.")
+        if agent_running and phase in {"waiting", "between matches"}:
+            warning_lines.append("Agent is waiting for a match. No new match activity observed.")
         elif log_status.file_stale and log_status.pane_observed:
             warning_lines.append("ℹ️ Live log file stale; monitor is using pane capture")
         elif log_status.stale:

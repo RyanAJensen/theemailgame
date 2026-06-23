@@ -55,6 +55,8 @@ DANGEROUS_COMMANDS = {
 TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
 API_KEY_RE = re.compile(r"\b(?:sk-|or-|nvapi-)[A-Za-z0-9._-]{8,}\b")
 WATCH_URL_RE = re.compile(r"https?://(?:www\.)?the-email-game\.fly\.dev/watch\?[^\s<>\"]+", re.IGNORECASE)
+URLSAFE_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_-]{32,}\b")
+TERMINAL_KEY_MASH_RE = re.compile(r"(?:\^\[\[[0-9;]*[A-Za-z])+")
 HEARTBEAT_LOG_AGE_RE = re.compile(r"log_age=([0-9hms ]+)")
 LOG_AGE_PART_RE = re.compile(r"(\d+)([smhd])")
 
@@ -65,9 +67,11 @@ def _utc_now() -> str:
 
 def _redact(value: Any) -> Any:
     if isinstance(value, str):
-        text = TOKEN_RE.sub("[telegram token redacted]", value)
+        text = TERMINAL_KEY_MASH_RE.sub("", value)
+        text = TOKEN_RE.sub("[telegram token redacted]", text)
         text = API_KEY_RE.sub("[api key redacted]", text)
         text = WATCH_URL_RE.sub("[watch link redacted]", text)
+        text = URLSAFE_TOKEN_RE.sub("[redacted-token]", text)
         return text
     if isinstance(value, list):
         return [_redact(item) for item in value]
