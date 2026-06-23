@@ -45,6 +45,7 @@ LOG_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-live.log"
 STATE_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-monitor-state.json"
 LEADERBOARD_STATE_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-leaderboard-state.json"
 BUDGET_STATE_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-budget-state.json"
+EVENTS_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-events.jsonl"
 POLL_INTERVAL_SEC = 1.0
 TELEGRAM_POLL_INTERVAL_SEC = 0.0
 TELEGRAM_HTTP_TIMEOUT_SEC = 40
@@ -59,6 +60,7 @@ TMUX_SESSION_AGENT = "emailgame"
 TMUX_SESSION_MONITOR = "emailgame-monitor"
 TELEGRAM_PARSE_MODE = "HTML"
 MAX_OBSERVED_LINES = 180
+MAX_EVENT_READ_LINES = 3000
 HOUSE_BOT_IDS = {"house_bot_1", "house_bot_2", "house_bot_3"}
 
 OSC8_LINK_RE = re.compile(r"\x1b]8;;.*?\x1b\\")
@@ -270,6 +272,18 @@ def _tmux_pane_id(name: str) -> str:
     return result.stdout.strip()
 
 
+def _tmux_pane_pipe_connected(name: str) -> Optional[bool]:
+    result = _run_command(["tmux", "display-message", "-p", "-t", name, "#{pane_pipe}"], timeout=5)
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    if value == "1":
+        return True
+    if value == "0":
+        return False
+    return None
+
+
 def _tmux_capture_pane(name: str, lines: int = 120) -> List[str]:
     result = _run_command(["tmux", "capture-pane", "-J", "-t", name, "-p"], timeout=5)
     if result.returncode != 0:
@@ -347,6 +361,65 @@ class ObservedLine:
         if not text or ts is None:
             return None
         return cls(ts=ts, text=text)
+
+
+@dataclass(frozen=True)
+class StructuredEvent:
+    ts: datetime
+    type: str
+    round: Optional[int]
+    agent: str
+    counterparty: str
+    message: str
+    model: str = ""
+    tokens: Optional[Dict[str, int]] = None
+    cost_usd: Optional[float] = None
+
+    def to_json(self) -> Dict[str, object]:
+        payload: Dict[str, object] = {
+            "ts": self.ts.isoformat(),
+            "type": self.type,
+            "round": self.round,
+            "agent": self.agent,
+            "counterparty": self.counterparty,
+            "message": self.message,
+        }
+        if self.model:
+            payload["model"] = self.model
+        if self.type == "llm_call" or self.tokens is not None:
+            payload["tokens"] = self.tokens
+        if self.type == "llm_call" or self.cost_usd is not None:
+            payload["cost_usd"] = self.cost_usd
+        return payload
+
+    @classmethod
+    def from_json(cls, raw: object) -> Optional["StructuredEvent"]:
+        if not isinstance(raw, dict):
+            return None
+        ts = _parse_sast(raw.get("ts"))
+        event_type = str(raw.get("type") or "").strip()
+        message = _clean_log_text(str(raw.get("message") or ""))
+        if ts is None or not event_type or not message:
+            return None
+        round_value: Optional[int] = None
+        raw_round = raw.get("round")
+        try:
+            if raw_round not in (None, ""):
+                round_value = int(raw_round)
+        except Exception:
+            round_value = None
+        tokens = raw.get("tokens")
+        return cls(
+            ts=ts,
+            type=event_type,
+            round=round_value,
+            agent=_redact(str(raw.get("agent") or "")).strip(),
+            counterparty=_redact(str(raw.get("counterparty") or "")).strip(),
+            message=message,
+            model=_redact(str(raw.get("model") or "")).strip(),
+            tokens=tokens if isinstance(tokens, dict) else None,
+            cost_usd=raw.get("cost_usd") if isinstance(raw.get("cost_usd"), (int, float)) else None,
+        )
 
 
 @dataclass
@@ -605,6 +678,7 @@ class EmailGameMonitor:
     def __init__(self, log_file: Path, state_file: Path) -> None:
         self.log_file = log_file
         self.state_file = state_file
+        self.events_file = EVENTS_FILE
         self.leaderboard_state_file = LEADERBOARD_STATE_FILE
         self.telegram = TelegramClient()
         self.state = MonitorState.load(state_file)
@@ -621,6 +695,7 @@ class EmailGameMonitor:
         self._last_heartbeat_monotonic = 0.0
         self._load_observed_lines()
         self._seed_observed_lines()
+        self._seed_structured_events_from_observed_lines()
 
     def run(self) -> int:
         print(f"[monitor] watching {self.log_file}")
@@ -716,6 +791,120 @@ class EmailGameMonitor:
         self._observed_lines.append(entry)
         return entry
 
+    def _append_structured_event(self, event: StructuredEvent) -> None:
+        self.events_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = event.to_json()
+        with self.events_file.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+    def _read_structured_events(self, limit: int = MAX_EVENT_READ_LINES) -> List[StructuredEvent]:
+        if not self.events_file.exists():
+            return []
+        try:
+            lines: Deque[str] = deque(maxlen=limit)
+            with self.events_file.open("r", encoding="utf-8") as handle:
+                for raw in handle:
+                    if raw.strip():
+                        lines.append(raw)
+        except OSError:
+            return []
+        events: List[StructuredEvent] = []
+        for line in lines:
+            try:
+                raw = json.loads(line)
+            except Exception:
+                continue
+            event = StructuredEvent.from_json(raw)
+            if event is not None:
+                events.append(event)
+        events.sort(key=lambda item: item.ts)
+        return events
+
+    def _latest_structured_event(self) -> Optional[StructuredEvent]:
+        events = self._read_structured_events(limit=MAX_EVENT_READ_LINES)
+        return events[-1] if events else None
+
+    def _record_structured_event_for_line(self, line: str, ts: datetime) -> Optional[StructuredEvent]:
+        event = self._structured_event_from_line(line, ts)
+        if event is not None:
+            self._append_structured_event(event)
+        return event
+
+    def _structured_event_from_line(self, line: str, ts: datetime) -> Optional[StructuredEvent]:
+        clean = _clean_log_text(line)
+        if not clean:
+            return None
+        lower = clean.lower()
+        round_id = self._extract_round_id(clean)
+        round_value = int(round_id) if round_id and round_id.isdigit() else None
+
+        def build(
+            event_type: str,
+            message: str,
+            *,
+            counterparty: str = "",
+            model: str = "",
+            tokens: Optional[Dict[str, int]] = None,
+            cost_usd: Optional[float] = None,
+        ) -> StructuredEvent:
+            return StructuredEvent(
+                ts=ts,
+                type=event_type,
+                round=round_value,
+                agent=self._agent_name,
+                counterparty=_redact(counterparty).strip(),
+                message=_clean_log_text(message)[:220],
+                model=model,
+                tokens=tokens,
+                cost_usd=cost_usd,
+            )
+
+        if "http request" in lower and "chat/completions" in lower:
+            return build("llm_call", "LLM chat completion request observed", model="gpt-4.1-mini")
+        if "match found - game starting!" in clean or "in game - round 1" in lower:
+            return build("game_started", "Game started")
+        if "game over - between matches now" in lower:
+            return build("game_ended", "Game ended")
+        if round_value is not None and ("in game - round" in lower or re.search(r"\[info\]\s*round\s+\d+:", clean, re.IGNORECASE)):
+            return build("round_started", f"Round {round_value} observed")
+
+        sent_match = re.search(r"Sent signature request to ([^ ]+)", clean, re.IGNORECASE)
+        if sent_match:
+            return build("request_sent", "Signature request sent", counterparty=sent_match.group(1).strip())
+
+        inbound_request = re.search(r"received from ([^:]+): .*?(?:Request for signature|Signature Request)", clean, re.IGNORECASE)
+        if inbound_request and "response" not in lower and "declin" not in lower:
+            return build("request_received", "Signature request received", counterparty=inbound_request.group(1).strip())
+
+        signed_payload = re.search(r"Received signed payload: signer=([^ ]+)", clean, re.IGNORECASE)
+        if signed_payload:
+            return build("signed_reply", "Signed payload received", counterparty=signed_payload.group(1).strip())
+
+        signed_message = re.search(r"received from ([^:]+): Signed Message", clean, re.IGNORECASE)
+        if signed_message:
+            return build("signed_reply", "Signed reply received", counterparty=signed_message.group(1).strip())
+
+        signed_request = re.search(r"Signed request from ([^ ]+)", clean, re.IGNORECASE)
+        if signed_request:
+            return build("signed_reply", "Signature request response sent", counterparty=signed_request.group(1).strip())
+
+        submit_round = re.search(r"submitted signature for round (\d+) from ([^ ]+)", clean, re.IGNORECASE)
+        if submit_round:
+            round_value = int(submit_round.group(1))
+            return build("signature_submitted", "Submitted signature to moderator", counterparty=submit_round.group(2).strip())
+
+        submitted = re.search(r"Submitted received signature from ([^ ]+)", clean, re.IGNORECASE)
+        if submitted:
+            return build("signature_submitted", "Submitted signature to moderator", counterparty=submitted.group(1).strip())
+
+        if "action completion reminder" in lower:
+            return build("reminder", "Action completion reminder received")
+
+        if "disconnected" in lower or "connection dropped" in lower or "connection error" in lower:
+            return build("disconnect", "Agent disconnect/connectivity event observed")
+
+        return None
+
     def _seed_observed_lines(self) -> None:
         if self._observed_lines or not self.log_file.exists():
             return
@@ -730,8 +919,67 @@ class EmailGameMonitor:
             self._record_line(line)
         self._persist_state()
 
+    def _seed_structured_events_from_observed_lines(self) -> None:
+        existing_types = {event.type for event in self._read_structured_events(limit=MAX_EVENT_READ_LINES)}
+        match_event_types = {
+            "llm_call",
+            "round_started",
+            "request_sent",
+            "request_received",
+            "signed_reply",
+            "signature_submitted",
+            "reminder",
+            "game_started",
+            "game_ended",
+            "disconnect",
+        }
+        if existing_types & match_event_types:
+            return
+        seeded = 0
+        for entry in self._observed_lines:
+            event = self._structured_event_from_line(entry.text, entry.ts)
+            if event is None:
+                continue
+            self._append_structured_event(event)
+            seeded += 1
+        if seeded:
+            print(f"[monitor] seeded {seeded} structured event(s) from observed state")
+
     def _recent_observed_entries(self, limit: int) -> List[ObservedLine]:
         return list(self._observed_lines)[-limit:]
+
+    def _structured_event_entries(self, limit: int = MAX_EVENT_READ_LINES) -> List[ObservedLine]:
+        entries: List[ObservedLine] = []
+        for event in self._read_structured_events(limit=limit):
+            text = self._structured_event_as_log_line(event)
+            if text:
+                entries.append(ObservedLine(ts=event.ts, text=text))
+        return entries
+
+    def _structured_event_as_log_line(self, event: StructuredEvent) -> str:
+        round_suffix = f" (Round {event.round})" if event.round is not None else ""
+        if event.type == "game_started":
+            return "✅ Match found - game starting!"
+        if event.type == "game_ended":
+            return "Game over - between matches now"
+        if event.type == "round_started" and event.round is not None:
+            return f"🎮 IN GAME - Round {event.round}"
+        if event.type == "request_sent" and event.counterparty:
+            return f"Sent signature request to {event.counterparty}"
+        if event.type == "request_received" and event.counterparty:
+            return f"received from {event.counterparty}: Signature Request{round_suffix}"
+        if event.type == "signed_reply" and event.counterparty:
+            return f"received from {event.counterparty}: Signed Message{round_suffix}"
+        if event.type == "signature_submitted":
+            if event.round is not None and event.counterparty:
+                return f"submitted signature for round {event.round} from {event.counterparty}"
+            if event.counterparty:
+                return f"Submitted received signature from {event.counterparty}"
+        if event.type == "reminder":
+            return f"received from system_reminder: Action Completion Reminder{round_suffix}"
+        if event.type == "disconnect":
+            return "disconnected"
+        return ""
 
     def _read_log_tail_entries(self, limit: int) -> List[ObservedLine]:
         if not self.log_file.exists():
@@ -801,6 +1049,7 @@ class EmailGameMonitor:
                 continue
             self._line_buffer.append(line)
             self._record_line(line, observed_now)
+            self._record_structured_event_for_line(line, observed_now)
             added += 1
         if added:
             self.state.phase = self._derive_phase()
@@ -941,7 +1190,8 @@ class EmailGameMonitor:
                 continue
             self._line_buffer.append(line)
             self._record_line(line, observed_now)
-            if "chat/completions" in line.lower():
+            structured_event = self._record_structured_event_for_line(line, observed_now)
+            if structured_event is not None and structured_event.type == "llm_call":
                 self._budget().record_llm_call(observed_now)
             event = self._classify(line)
             if event:
@@ -1088,6 +1338,7 @@ class EmailGameMonitor:
             log_file=self.log_file,
             monitor_state_file=self.state_file,
             leaderboard_state_file=self.leaderboard_state_file,
+            event_store_file=EVENTS_FILE,
         )
 
     def _budget(self) -> EmailGameBudget:
@@ -1096,6 +1347,7 @@ class EmailGameMonitor:
             monitor_state_file=self.state_file,
             leaderboard_state_file=self.leaderboard_state_file,
             budget_state_file=BUDGET_STATE_FILE,
+            event_store_file=EVENTS_FILE,
         )
 
     def _coach_text(self) -> str:
@@ -1245,7 +1497,8 @@ class EmailGameMonitor:
         return None
 
     def _latest_significant_entry(self) -> Optional[ObservedLine]:
-        for entry in reversed(self._recent_observed_entries(MAX_STATUS_LINES)):
+        entries = self._structured_event_entries(MAX_STATUS_LINES) or self._recent_observed_entries(MAX_STATUS_LINES)
+        for entry in reversed(entries):
             if self._looks_interesting(entry.text):
                 return entry
         return None
@@ -1267,7 +1520,7 @@ class EmailGameMonitor:
         return "n/a"
 
     def _derive_phase(self) -> str:
-        recent = self._recent_observed_entries(MAX_STATUS_LINES)
+        recent = self._structured_event_entries(MAX_STATUS_LINES) or self._recent_observed_entries(MAX_STATUS_LINES)
         if not recent:
             return "waiting"
         combined = "\n".join(entry.text for entry in recent).lower()
@@ -1378,6 +1631,17 @@ class EmailGameMonitor:
     def _reconnect_log_text(self) -> str:
         self._seed_from_tmux_capture()
         reconnected, reconnect_error = _tmux_reconnect_log_pipe(self.log_file)
+        marker_ts = _now_sast()
+        self._append_structured_event(
+            StructuredEvent(
+                ts=marker_ts,
+                type="reconnectlog",
+                round=None,
+                agent=self._agent_name,
+                counterparty="",
+                message="Log pipe reconnect requested",
+            )
+        )
         if reconnected:
             self._sync_start_offset()
             self._seed_from_tmux_capture()
@@ -1386,13 +1650,16 @@ class EmailGameMonitor:
         pane_id = _tmux_pane_id(TMUX_SESSION_AGENT) or "unknown"
         pane_pid = _tmux_pane_pid(TMUX_SESSION_AGENT)
         pane_pid_text = str(pane_pid) if pane_pid else "unknown"
+        latest_event = self._latest_structured_event()
+        latest_event_text = _format_sast(latest_event.ts if latest_event else marker_ts)
         if reconnected:
             return (
                 "✅ <b>Log pipe reconnected</b>\n\n"
                 f"Pane: <code>{html_escape(pane_id, quote=False)}</code>\n"
                 f"PID: <code>{html_escape(pane_pid_text, quote=False)}</code>\n"
                 f"Log mtime: <b>{html_escape(self._log_file_mtime_text(), quote=False)}</b>\n"
-                f"Log freshness: <b>{html_escape(self._format_age(status.age_seconds), quote=False)}</b>"
+                f"Log freshness: <b>{html_escape(self._format_age(status.age_seconds), quote=False)}</b>\n"
+                f"Latest event: <b>{html_escape(latest_event_text, quote=False)}</b>"
             )
         if reconnect_error:
             return (
@@ -1400,6 +1667,7 @@ class EmailGameMonitor:
                 f"Pane: <code>{html_escape(pane_id, quote=False)}</code>\n"
                 f"PID: <code>{html_escape(pane_pid_text, quote=False)}</code>\n"
                 f"Log mtime: <b>{html_escape(self._log_file_mtime_text(), quote=False)}</b>\n"
+                f"Latest event: <b>{html_escape(latest_event_text, quote=False)}</b>\n"
                 f"Error: <code>{html_escape(_clean_log_text(reconnect_error), quote=False)}</code>"
             )
         return (
@@ -1407,7 +1675,8 @@ class EmailGameMonitor:
             f"Pane: <code>{html_escape(pane_id, quote=False)}</code>\n"
             f"PID: <code>{html_escape(pane_pid_text, quote=False)}</code>\n"
             f"Log mtime: <b>{html_escape(self._log_file_mtime_text(), quote=False)}</b>\n"
-            f"Log freshness: <b>{html_escape(self._format_age(status.age_seconds), quote=False)}</b>"
+            f"Log freshness: <b>{html_escape(self._format_age(status.age_seconds), quote=False)}</b>\n"
+            f"Latest event: <b>{html_escape(latest_event_text, quote=False)}</b>"
         )
 
     def _status_text(self) -> str:
@@ -1425,21 +1694,24 @@ class EmailGameMonitor:
         process_icon = "✅" if agent_running else "🔴"
         monitor_icon = "✅" if monitor_running else "🔴"
         updated = _format_sast(latest_entry.ts if latest_entry else None)
+        latest_event = self._latest_structured_event()
+        latest_event_age = (
+            max(0.0, (_now_sast() - latest_event.ts).total_seconds()) if latest_event is not None else None
+        )
         summary_line = self._match_summary_line(summary)
         reminder_count = sum(round_summary.reminders for round_summary in summary.rounds.values()) if summary else 0
         pane_id = _tmux_pane_id(TMUX_SESSION_AGENT) or "unknown"
         pane_pid = _tmux_pane_pid(TMUX_SESSION_AGENT)
-        pane_fresh = bool(
-            log_status.pane_observed
-            and log_status.pane_age_seconds is not None
-            and log_status.pane_age_seconds <= STALE_LOG_THRESHOLD_SEC
-        )
+        pipe_connected = _tmux_pane_pipe_connected(TMUX_SESSION_AGENT)
+        waiting_alone = self._waiting_alone()
         source = "live log file" if not log_status.file_stale else ("tmux pane capture" if log_status.pane_observed else "stale log file")
         warning_lines: List[str] = []
         if log_status.file_stale and log_status.pane_observed:
             warning_lines.append("ℹ️ Live log file stale; monitor is using pane capture")
         elif log_status.stale:
             warning_lines.append("⚠️ Log stream stale")
+        if waiting_alone:
+            warning_lines.append("Waiting for match; leaderboard may stay flat until other agents are online.")
         if log_status.reconnected:
             warning_lines.append("✅ tmux pipe reattached")
         elif log_status.reconnect_error:
@@ -1455,6 +1727,8 @@ class EmailGameMonitor:
             f"Log freshness: <b>{html_escape(self._format_age(log_status.age_seconds), quote=False)}</b>",
             f"Log mtime: <b>{html_escape(self._log_file_mtime_text(), quote=False)}</b>",
             f"Pane observed freshness: <b>{html_escape(self._format_age(log_status.pane_age_seconds), quote=False)}</b>",
+            f"Structured event freshness: <b>{html_escape(self._format_age(latest_event_age), quote=False)}</b>",
+            f"Pipe connected: <b>{html_escape(self._format_yes_no_unknown(pipe_connected), quote=False)}</b>",
             f"Pipe reconnected: <b>{'yes' if log_status.reconnected else 'no'}</b>",
             f"Pane: <code>{html_escape(pane_id, quote=False)}</code> / PID <code>{html_escape(str(pane_pid) if pane_pid else 'unknown', quote=False)}</code>",
             f"Latest round: <b>{html_escape(round_text, quote=False)}</b>",
@@ -1475,6 +1749,21 @@ class EmailGameMonitor:
         has_game = any("IN GAME" in entry.text or "Match found" in entry.text for entry in recent)
         finished = any("Game over - between matches now" in entry.text for entry in recent)
         return has_game and not finished
+
+    def _waiting_alone(self) -> bool:
+        data, _error = self._fetch_leaderboard_data()
+        if not isinstance(data, dict):
+            return False
+        live = data.get("live")
+        if not isinstance(live, dict):
+            return False
+        try:
+            online = int(live.get("players"))
+            in_game = int(live.get("in_game"))
+            waiting = int(live.get("queued"))
+        except Exception:
+            return False
+        return online == 1 and in_game == 0 and waiting == 1
 
     def _fetch_leaderboard_data(self) -> Tuple[Optional[Dict[str, object]], str]:
         if not self._server_url:
@@ -2156,7 +2445,8 @@ class EmailGameMonitor:
         return None
 
     def _latest_match_summary(self) -> Optional[MatchSummary]:
-        entries = self._recent_observed_entries(MAX_OBSERVED_LINES)
+        structured_entries = self._structured_event_entries()
+        entries = structured_entries or self._recent_observed_entries(MAX_OBSERVED_LINES)
         if not entries:
             return None
 

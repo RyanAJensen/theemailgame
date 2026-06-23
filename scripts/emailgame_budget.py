@@ -27,6 +27,7 @@ MONITOR_STATE_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-monitor-state.json
 LEADERBOARD_STATE_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-leaderboard-state.json"
 COACH_STATE_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-coach-state.json"
 BUDGET_STATE_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-budget-state.json"
+EVENTS_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-events.jsonl"
 
 SAST_TZ = ZoneInfo("Africa/Johannesburg") if ZoneInfo is not None else timezone(timedelta(hours=2))
 CONFIGURED_BUDGET_USD = 30
@@ -132,12 +133,14 @@ class EmailGameBudget:
         leaderboard_state_file: Path = LEADERBOARD_STATE_FILE,
         coach_state_file: Path = COACH_STATE_FILE,
         budget_state_file: Path = BUDGET_STATE_FILE,
+        event_store_file: Path = EVENTS_FILE,
     ) -> None:
         self.log_file = log_file
         self.monitor_state_file = monitor_state_file
         self.leaderboard_state_file = leaderboard_state_file
         self.coach_state_file = coach_state_file
         self.budget_state_file = budget_state_file
+        self.event_store_file = event_store_file
         self.state = _read_json(budget_state_file)
 
     def analyze(self, *, persist: bool = True) -> BudgetAnalysis:
@@ -147,7 +150,8 @@ class EmailGameBudget:
         log_calls, untimed_calls, token_totals, parse_errors, model = self._parse_log(log_text, now)
         observed_calls = self._parse_observed_calls()
         recorded_calls = self._recorded_call_times()
-        calls_for_windows = recorded_calls or observed_calls or log_calls
+        event_calls = self._event_call_times()
+        calls_for_windows = event_calls or recorded_calls or observed_calls or log_calls
         score_deltas = self._score_deltas()
         token_tracking_available = any(token_totals.values())
         windows_available = bool(calls_for_windows)
@@ -156,7 +160,7 @@ class EmailGameBudget:
         calls_60m = _count_since(calls_for_windows, now, 60) if windows_available else 0
         parsed_total_calls = len(log_calls) + untimed_calls
         historical_total_calls = self._historical_total_calls(parsed_total_calls)
-        total_calls = max(parsed_total_calls, historical_total_calls + len(recorded_calls))
+        total_calls = max(parsed_total_calls, historical_total_calls + len(recorded_calls), len(event_calls))
         warnings = self._warnings(calls_15m, score_deltas, token_tracking_available, parse_errors, windows_available)
         analysis = BudgetAnalysis(
             budget_usd=CONFIGURED_BUDGET_USD,
@@ -387,6 +391,30 @@ class EmailGameBudget:
             parsed = _parse_dt(item.get("ts"))
             if parsed is not None:
                 calls.append(parsed)
+        calls.sort()
+        return calls
+
+    def _event_call_times(self) -> List[datetime]:
+        if not self.event_store_file.exists():
+            return []
+        calls: List[datetime] = []
+        try:
+            with self.event_store_file.open("r", encoding="utf-8") as handle:
+                for raw_line in handle:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        raw = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(raw, dict) or raw.get("type") != "llm_call":
+                        continue
+                    parsed = _parse_dt(raw.get("ts"))
+                    if parsed is not None:
+                        calls.append(parsed)
+        except OSError:
+            return []
         calls.sort()
         return calls
 

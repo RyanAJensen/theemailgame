@@ -31,6 +31,7 @@ LOG_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-live.log"
 MONITOR_STATE_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-monitor-state.json"
 LEADERBOARD_STATE_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-leaderboard-state.json"
 COACH_STATE_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-coach-state.json"
+EVENTS_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-events.jsonl"
 MATCH_REVIEW_FILE = PROJECT_ROOT / "MATCH_REVIEW.md"
 
 SAST_TZ = ZoneInfo("Africa/Johannesburg") if ZoneInfo is not None else timezone(timedelta(hours=2))
@@ -198,6 +199,7 @@ class EmailGameCoach:
         monitor_state_file: Path = MONITOR_STATE_FILE,
         leaderboard_state_file: Path = LEADERBOARD_STATE_FILE,
         coach_state_file: Path = COACH_STATE_FILE,
+        event_store_file: Path = EVENTS_FILE,
         match_review_file: Path = MATCH_REVIEW_FILE,
     ) -> None:
         load_dotenv(PROJECT_ROOT / ".env.local")
@@ -205,6 +207,7 @@ class EmailGameCoach:
         self.monitor_state_file = monitor_state_file
         self.leaderboard_state_file = leaderboard_state_file
         self.coach_state_file = coach_state_file
+        self.event_store_file = event_store_file
         self.match_review_file = match_review_file
         self.agent_name = os.getenv("EMAIL_GAME_AGENT_NAME", "").strip() or AGENT_NAME_DEFAULT
         self.state = _read_json(coach_state_file)
@@ -540,6 +543,9 @@ class EmailGameCoach:
         return age_seconds, between_matches
 
     def _read_log_entries(self) -> List[Tuple[str, Optional[datetime]]]:
+        structured_entries = self._read_structured_event_entries()
+        if structured_entries:
+            return structured_entries
         observed_entries = self._read_monitor_observed_entries()
         if observed_entries and self._log_age_seconds() is not None and self._log_age_seconds() > 300:
             return observed_entries
@@ -554,6 +560,63 @@ class EmailGameCoach:
         except OSError:
             return []
         return [(_redact(line.strip()), None) for line in data.splitlines() if line.strip()]
+
+    def _read_structured_event_entries(self) -> List[Tuple[str, Optional[datetime]]]:
+        if not self.event_store_file.exists():
+            return []
+        entries: List[Tuple[str, Optional[datetime]]] = []
+        try:
+            with self.event_store_file.open("r", encoding="utf-8") as handle:
+                for raw_line in handle:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        raw = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(raw, dict):
+                        continue
+                    text = self._structured_event_log_line(raw)
+                    if text:
+                        entries.append((text, _parse_dt(raw.get("ts"))))
+        except OSError:
+            return []
+        return entries[-MAX_HISTORY:]
+
+    def _structured_event_log_line(self, event: Dict[str, Any]) -> str:
+        event_type = str(event.get("type") or "").strip()
+        counterparty = _redact(str(event.get("counterparty") or "")).strip()
+        round_text = ""
+        raw_round = event.get("round")
+        try:
+            if raw_round not in (None, ""):
+                round_text = str(int(raw_round))
+        except Exception:
+            round_text = ""
+        round_suffix = f" (Round {round_text})" if round_text else ""
+        if event_type == "game_started":
+            return "✅ Match found - game starting!"
+        if event_type == "game_ended":
+            return "Game over - between matches now"
+        if event_type == "round_started" and round_text:
+            return f"🎮 IN GAME - Round {round_text}"
+        if event_type == "request_sent" and counterparty:
+            return f"Sent signature request to {counterparty}"
+        if event_type == "request_received" and counterparty:
+            return f"received from {counterparty}: Signature Request{round_suffix}"
+        if event_type == "signed_reply" and counterparty:
+            return f"received from {counterparty}: Signed Message{round_suffix}"
+        if event_type == "signature_submitted":
+            if round_text and counterparty:
+                return f"submitted signature for round {round_text} from {counterparty}"
+            if counterparty:
+                return f"Submitted received signature from {counterparty}"
+        if event_type == "reminder":
+            return f"received from system_reminder: Action Completion Reminder{round_suffix}"
+        if event_type == "disconnect":
+            return "disconnected"
+        return ""
 
     def _read_monitor_observed_entries(self) -> List[Tuple[str, Optional[datetime]]]:
         state = _read_json(self.monitor_state_file)
