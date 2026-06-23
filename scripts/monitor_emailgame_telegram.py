@@ -61,6 +61,7 @@ TMUX_SESSION_MONITOR = "emailgame-monitor"
 TELEGRAM_PARSE_MODE = "HTML"
 MAX_OBSERVED_LINES = 180
 MAX_EVENT_READ_LINES = 3000
+MAX_COMMAND_AUDIT = 40
 HOUSE_BOT_IDS = {"house_bot_1", "house_bot_2", "house_bot_3"}
 
 OSC8_LINK_RE = re.compile(r"\x1b]8;;.*?\x1b\\")
@@ -464,17 +465,26 @@ class MonitorState:
     connected_sent_pid: Optional[int] = None
     connected_sent_at: str = ""
     observed_lines: List[Dict[str, str]] = field(default_factory=list)
+    telegram_commands: List[Dict[str, str]] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path) -> "MonitorState":
         raw = _read_json(path)
         observed_lines = []
+        telegram_commands = []
         for item in raw.get("observed_lines", []) if isinstance(raw, dict) else []:
             if isinstance(item, dict):
                 ts = str(item.get("ts") or "").strip()
                 text = str(item.get("text") or "").strip()
                 if ts and text:
                     observed_lines.append({"ts": ts, "text": text})
+        for item in raw.get("telegram_commands", []) if isinstance(raw, dict) else []:
+            if isinstance(item, dict):
+                ts = str(item.get("ts") or "").strip()
+                command = str(item.get("command") or "").strip()
+                response = str(item.get("response") or "").strip()
+                if ts and command:
+                    telegram_commands.append({"ts": ts, "command": command, "response": response})
         return cls(
             log_offset=int(raw.get("log_offset") or 0),
             telegram_offset=int(raw.get("telegram_offset") or 0),
@@ -483,10 +493,12 @@ class MonitorState:
             connected_sent_pid=int(raw.get("connected_sent_pid") or 0) or None,
             connected_sent_at=str(raw.get("connected_sent_at") or ""),
             observed_lines=observed_lines,
+            telegram_commands=telegram_commands[-MAX_COMMAND_AUDIT:],
         )
 
     def dump(self, path: Path) -> None:
         observed_lines = self.observed_lines or []
+        telegram_commands = self.telegram_commands or []
         _write_json(
             path,
             {
@@ -497,6 +509,7 @@ class MonitorState:
                 "connected_sent_pid": self.connected_sent_pid,
                 "connected_sent_at": self.connected_sent_at,
                 "observed_lines": observed_lines[-MAX_OBSERVED_LINES:],
+                "telegram_commands": telegram_commands[-MAX_COMMAND_AUDIT:],
             },
         )
 
@@ -1244,11 +1257,23 @@ class EmailGameMonitor:
             parts = text.split()
             command = parts[0].split("@", 1)[0]
             response = self._dispatch_command(command, parts[1:])
+            self._record_telegram_command(command, bool(response))
             if response:
                 self._telegram_send(response)
 
         self.state.telegram_offset = update_id_int + 1
         self._persist_state()
+
+    def _record_telegram_command(self, command: str, response_present: bool) -> None:
+        safe_command = command if re.fullmatch(r"/[A-Za-z0-9_]+", command) else "/unknown"
+        self.state.telegram_commands.append(
+            {
+                "ts": _now_sast().isoformat(),
+                "command": safe_command,
+                "response": "yes" if response_present else "no",
+            }
+        )
+        self.state.telegram_commands = self.state.telegram_commands[-MAX_COMMAND_AUDIT:]
 
     def _dispatch_command(self, command: str, args: List[str]) -> str:
         if command == "/help":
