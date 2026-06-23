@@ -35,9 +35,8 @@ def make_agent():
     agent.in_game = True
     agent.messages_sent = 0
     agent.current_instruction = None
-    agent.driver = SimpleNamespace(on_emails=lambda messages: None, message_log=[])
-
-    events = {"sent": [], "signed": [], "submitted": []}
+    events = {"sent": [], "signed": [], "submitted": [], "fallback": []}
+    agent.driver = SimpleNamespace(on_emails=lambda messages: events["fallback"].extend(messages), message_log=[])
 
     def send_message(**kwargs):
         events["sent"].append(kwargs)
@@ -84,6 +83,15 @@ def request_message(sender: str, body: str):
         "from": sender,
         "to": AGENT_ID,
         "subject": "Signature request",
+        "body": body,
+    }
+
+
+def thread_reply(sender: str, subject: str, body: str = "Thanks for handling that."):
+    return {
+        "from": sender,
+        "to": AGENT_ID,
+        "subject": subject,
         "body": body,
     }
 
@@ -231,6 +239,66 @@ def main() -> None:
         raise AssertionError("stale signed payload decision log missing")
     if "missing required signer: mallory" not in log_text:
         raise AssertionError("missing-required-signer decision log does not include signer")
+
+    focused = make_agent()
+    focused_round3_message = "Delta message for sign-then-decline prevention."
+    focused_round3 = moderator_message(
+        3,
+        focused_round3_message,
+        ["house_bot_3", "house_bot_2"],
+        ["house_bot_2"],
+    )
+    focused.on_message_batch([focused_round3])
+    assert_equal(len(focused._events["sent"]), 2, "focused round 3 request fanout")
+    assert_equal(len(focused._events["fallback"]), 0, "moderator deterministic handling avoids fallback")
+
+    authorized_request = request_message(
+        "house_bot_2",
+        "Please sign this message for me: Authorized inbound request.",
+    )
+    focused.on_message_batch([authorized_request])
+    assert_equal(len(focused._events["signed"]), 1, "authorized request signed once")
+    assert_equal(len(focused._events["fallback"]), 0, "authorized request not passed to fallback")
+
+    focused.on_message_batch([authorized_request])
+    assert_equal(len(focused._events["signed"]), 1, "duplicate authorized request not signed twice")
+    assert_equal(len(focused._events["fallback"]), 0, "duplicate authorized request not passed to fallback")
+
+    signed_request_followup = thread_reply(
+        "house_bot_2",
+        "Declined Signature Request",
+        "Re: request for signature. No further action needed.",
+    )
+    focused.on_message_batch([signed_request_followup])
+    assert_equal(len(focused._events["sent"]), 2, "signed requester follow-up does not trigger decline")
+    assert_equal(len(focused._events["fallback"]), 0, "signed requester follow-up not passed to fallback")
+
+    unauthorized_request = request_message(
+        "house_bot_1",
+        "Please sign this message for me: Unauthorized inbound request.",
+    )
+    focused.on_message_batch([unauthorized_request])
+    assert_equal(len(focused._events["sent"]), 3, "unauthorized request declined once")
+    focused.on_message_batch([unauthorized_request])
+    assert_equal(len(focused._events["sent"]), 3, "duplicate unauthorized request not declined twice")
+    assert_equal(len(focused._events["fallback"]), 0, "unauthorized request not passed to fallback")
+
+    focused_signature = signed_payload_message("house_bot_3", focused_round3_message)
+    focused.on_message_batch([focused_signature])
+    assert_equal(len(focused._events["submitted"]), 1, "focused round 3 valid signed payload submitted")
+    focused.on_message_batch([focused_signature])
+    assert_equal(len(focused._events["submitted"]), 1, "focused round 3 duplicate payload skipped")
+    assert_equal(
+        focused._pending_signature_requests[focused_round3_message],
+        {"house_bot_2"},
+        "missing house_bot_2 remains pending after house_bot_3 submission",
+    )
+
+    log_text = log_stream.getvalue()
+    if "ignored signature-thread follow-up from already signed requester house_bot_2 in round 3" not in log_text:
+        raise AssertionError("signed requester follow-up skip log missing")
+    if "Skipped because duplicate: unauthorized request already declined from house_bot_1 in round 3" not in log_text:
+        raise AssertionError("duplicate unauthorized decline skip log missing")
 
     duplicate_round1 = request_message(
         "mallory",

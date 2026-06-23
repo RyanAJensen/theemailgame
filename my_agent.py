@@ -75,8 +75,10 @@ class CustomAgent(BaseAgent):
         self._seen_message_ids: Set[str] = set()
         self._sent_request_keys: Set[Tuple[int, str, Tuple[str, ...]]] = set()
         self._submitted_signature_keys: Set[Tuple[str, str, str]] = set()
-        self._handled_request_keys: Set[Tuple[str, str]] = set()
-        self._declined_request_keys: Set[Tuple[str, str]] = set()
+        self._handled_request_keys: Set[Tuple[int, str, str]] = set()
+        self._declined_request_keys: Set[Tuple[int, str, str]] = set()
+        self._handled_requesters_by_round: Dict[int, Set[str]] = {}
+        self._declined_requesters_by_round: Dict[int, Set[str]] = {}
         self._processed_moderator_keys: Set[Tuple[int, str, Tuple[str, ...], Tuple[str, ...], Tuple[str, ...]]] = set()
         self._pending_signature_requests: Dict[str, Set[str]] = {}
         self._pending_signature_rounds: Dict[str, int] = {}
@@ -111,6 +113,9 @@ class CustomAgent(BaseAgent):
                 continue
 
             if self._maybe_handle_signature_request(message):
+                continue
+
+            if self._maybe_ignore_handled_signature_thread_reply(message):
                 continue
 
             fallback.append(message)
@@ -405,9 +410,10 @@ class CustomAgent(BaseAgent):
             return False
 
         self._refresh_authorization_resolution()
-        request_key = (requester, request)
+        request_key = (self.current_round, requester, request)
         if request_key in self._handled_request_keys:
-            logger.info("Duplicate signature request ignored from %s", requester)
+            self._handled_requesters_by_round.setdefault(self.current_round, set()).add(requester)
+            logger.info("Skipped because duplicate: signature request already handled from %s in round %s", requester, self.current_round)
             return True
 
         if requester in self.current_authorization_resolved:
@@ -419,12 +425,15 @@ class CustomAgent(BaseAgent):
             )
             if result.get("success"):
                 self._handled_request_keys.add(request_key)
+                self._handled_requesters_by_round.setdefault(self.current_round, set()).add(requester)
                 logger.info("Signed request from %s", requester)
             else:
                 logger.warning("Failed to sign request from %s", requester)
             return True
 
         if request_key in self._declined_request_keys:
+            self._declined_requesters_by_round.setdefault(self.current_round, set()).add(requester)
+            logger.info("Skipped because duplicate: unauthorized request already declined from %s in round %s", requester, self.current_round)
             return True
 
         self.send_message(
@@ -436,8 +445,39 @@ class CustomAgent(BaseAgent):
             ),
         )
         self._declined_request_keys.add(request_key)
-        logger.info("Skipped because unauthorized: declined request from %s", requester)
+        self._declined_requesters_by_round.setdefault(self.current_round, set()).add(requester)
+        logger.info("Skipped because unauthorized: declined request from %s in round %s", requester, self.current_round)
+        if not self.current_authorization_resolved:
+            logger.info("Skipped because missing authorization: no resolved authorized signers for round %s", self.current_round)
         return True
+
+    def _maybe_ignore_handled_signature_thread_reply(self, message: Dict) -> bool:
+        sender = self._normalize_agent_id(str(message.get("from", "")))
+        if not sender:
+            return False
+
+        subject = str(message.get("subject", "") or "")
+        body = str(message.get("body", "") or "")
+        if not self._looks_like_signature_thread_reply(subject, body):
+            return False
+
+        if sender in self._handled_requesters_by_round.get(self.current_round, set()):
+            logger.info(
+                "Skipped because duplicate: ignored signature-thread follow-up from already signed requester %s in round %s",
+                sender,
+                self.current_round,
+            )
+            return True
+
+        if sender in self._declined_requesters_by_round.get(self.current_round, set()):
+            logger.info(
+                "Skipped because duplicate: ignored signature-thread follow-up from already declined requester %s in round %s",
+                sender,
+                self.current_round,
+            )
+            return True
+
+        return False
 
     def _scan_mailbox_for_signed_messages(self) -> None:
         token = getattr(self, "_jwt_token", None)
@@ -597,6 +637,25 @@ class CustomAgent(BaseAgent):
                 if value:
                     return value
         return None
+
+    @staticmethod
+    def _looks_like_signature_thread_reply(subject: str, body: str) -> bool:
+        text = f"{subject}\n{body}".lower()
+        if "signed_message_json" in text:
+            return False
+        return any(
+            phrase in text
+            for phrase in (
+                "signature request",
+                "request for signature",
+                "sign this message",
+                "please sign",
+                "declined signature",
+                "decline to sign",
+                "cannot sign",
+                "unable to sign",
+            )
+        )
 
     @staticmethod
     def _extract_signed_message(body: str) -> Optional[Dict]:
