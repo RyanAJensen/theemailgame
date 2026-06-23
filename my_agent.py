@@ -79,6 +79,7 @@ class CustomAgent(BaseAgent):
         self._declined_request_keys: Set[Tuple[str, str]] = set()
         self._processed_moderator_keys: Set[Tuple[int, str, Tuple[str, ...], Tuple[str, ...], Tuple[str, ...]]] = set()
         self._pending_signature_requests: Dict[str, Set[str]] = {}
+        self._pending_signature_rounds: Dict[str, int] = {}
         self._sender_history: Dict[str, List[str]] = {}
         self._mailbox_signature_scan_ids: Set[str] = set()
 
@@ -91,12 +92,6 @@ class CustomAgent(BaseAgent):
         non_moderator_messages: List[Dict] = []
 
         for message in messages:
-            message_id = str(message.get("message_id") or "").strip()
-            if message_id and message_id in self._seen_message_ids:
-                continue
-            if message_id:
-                self._seen_message_ids.add(message_id)
-
             sender = self._normalize_agent_id(str(message.get("from", "")))
             if sender and sender != "moderator":
                 self._remember_sender_message(sender, str(message.get("body", "") or ""))
@@ -138,7 +133,7 @@ class CustomAgent(BaseAgent):
         else:
             if self.current_round and parsed_round < self.current_round:
                 logger.info(
-                    "Ignoring stale moderator message for round %s (current round %s)",
+                    "Skipped because stale: moderator message for round %s (current round %s)",
                     parsed_round,
                     self.current_round,
                 )
@@ -192,6 +187,7 @@ class CustomAgent(BaseAgent):
 
         pending = self._pending_signature_requests.setdefault(self.current_assigned_message, set())
         pending.update(self.current_request_targets)
+        self._pending_signature_rounds[self.current_assigned_message] = self.current_round
 
         for agent_id in self._dedupe(self.current_request_targets):
             # TODO(strategy): learn which request targets are fastest / most reliable in live ladders.
@@ -216,6 +212,7 @@ class CustomAgent(BaseAgent):
         signer = self._normalize_agent_id(str(signed_message.get("signer", "")))
         signed_for = self._normalize_agent_id(str(signed_message.get("signed_for", "")))
         pending_signers = self._pending_signature_requests.get(original_message)
+        pending_round = self._pending_signature_rounds.get(original_message, self.current_round)
         logger.info(
             "Received signed payload: signer=%s signed_for=%s original=%r current=%r pending=%s",
             signer or "<unknown>",
@@ -226,7 +223,7 @@ class CustomAgent(BaseAgent):
         )
         if not pending_signers:
             logger.info(
-                "Ignoring signed payload for untracked message: signer=%s signed_for=%s original=%r current=%r",
+                "Skipped because stale: signed payload for untracked message signer=%s signed_for=%s original=%r current=%r",
                 signer or "<unknown>",
                 signed_for or "<unknown>",
                 original_message,
@@ -235,13 +232,14 @@ class CustomAgent(BaseAgent):
             return False
         if signer not in pending_signers:
             logger.warning(
-                "Ignoring signature from unexpected signer %s for message %r",
+                "Skipped because missing required signer: got %s for message %r, pending=%s",
                 signer or "<unknown>",
                 original_message,
+                sorted(pending_signers),
             )
             return False
         if signed_for and signed_for != self.agent_id:
-            logger.warning("Ignoring signature for unexpected recipient %s", signed_for)
+            logger.warning("Skipped because unauthorized: signature was for unexpected recipient %s", signed_for)
             return False
 
         key = (
@@ -265,7 +263,9 @@ class CustomAgent(BaseAgent):
             pending_signers.discard(signer)
             if not pending_signers:
                 self._pending_signature_requests.pop(original_message, None)
+                self._pending_signature_rounds.pop(original_message, None)
             logger.info("Submitted received signature from %s", key[0])
+            logger.info("submitted signature for round %s from %s", pending_round, key[0])
         else:
             logger.warning("Signature submission failed for %s -> %s", key[0], key[1])
         return True
@@ -312,7 +312,7 @@ class CustomAgent(BaseAgent):
             ),
         )
         self._declined_request_keys.add(request_key)
-        logger.info("Declined request from %s", requester)
+        logger.info("Skipped because unauthorized: declined request from %s", requester)
         return True
 
     def _scan_mailbox_for_signed_messages(self) -> None:

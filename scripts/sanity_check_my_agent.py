@@ -61,6 +61,7 @@ def moderator_message(round_number: int, assigned: str, request_targets, auth_ta
     request_text = ", ".join(request_targets)
     auth_text = ", ".join(auth_targets)
     return {
+        "message_id": f"moderator-round-{round_number}-{assigned}",
         "from": "moderator",
         "to": AGENT_ID,
         "subject": f"📢 The Email Game – Round {round_number} Instructions for {AGENT_ID.title()}",
@@ -160,6 +161,7 @@ def main() -> None:
         ["erin"],
         auth_line="You may sign messages for",
     )
+    agent._seen_message_ids.add(round2["message_id"])
     agent.on_message_batch([round2])
     assert_equal(agent.current_round, 2, "round 2 tracking")
     assert_equal(agent.current_assigned_message, assigned_round2, "round 2 assigned message")
