@@ -1,124 +1,176 @@
-# Papzin Email Game Competition Runbook
+# Papzin Email Game Runbook
 
-Agent name:
-- `letlhogonolo_fanampe`
+This runbook documents the current live workflow for Papzin's Email Game agent.
 
-## 1) Verify access first
+## Current Architecture
 
-Run the preflight helper from the repo root:
+### `emailgame`
+
+The `emailgame` tmux session runs the live competition agent:
+
+```bash
+./.venv/bin/python scripts/run_custom_agent.py letlhogonolo_fanampe --module my_agent.py --server https://the-email-game.fly.dev
+```
+
+The exact agent name must be:
+
+```text
+letlhogonolo_fanampe
+```
+
+Do not change spelling, casing, or underscores.
+
+### `emailgame-monitor`
+
+The `emailgame-monitor` tmux session runs the Telegram control and notification process:
+
+```bash
+./.venv/bin/python scripts/monitor_emailgame_telegram.py
+```
+
+Primary Telegram commands:
+- `/status`
+- `/logs`
+- `/tail`
+- `/leaderboard`
+- `/preflight`
+- `/version`
+- `/startagent`
+- `/restartagent`
+- `/stopagent`
+
+The monitor also sends operational alerts for agent status, leaderboard movement, stale logs, disconnects, and coach recommendations.
+
+### `emailgame-coach`
+
+The coach is integrated into the monitor. It reads local logs and state summaries, then produces recommendations without requiring Papzin to read raw logs.
+
+Coach commands:
+- `/coach`
+- `/recommend`
+- `/reviewmatch`
+- `/metrics`
+
+Primary local data sources:
+- `agent_logs/emailgame-live.log`
+- `agent_logs/emailgame-monitor-state.json`
+- `agent_logs/emailgame-leaderboard-state.json`
+- `agent_logs/emailgame-coach-state.json`
+
+## Model Rules
+
+Allowed models:
+- `gpt-4.1-mini`
+- `gpt-4.1`
+
+Default model:
+- `gpt-4.1-mini`
+
+The agent should use deterministic parsing first. LLM fallback should be used only when deterministic parsing cannot confidently extract the assignment or request target.
+
+## Safety Rules
+
+- Never print `.env.local`.
+- Never print API keys.
+- Never print the Telegram bot token.
+- Never print watch URL tokens.
+- Never sign unauthorized requests.
+- Never submit stale signed payloads.
+- Restart the agent only between matches.
+- Use monitor controls only through safe, whitelisted commands.
+
+## Preflight
+
+Run from the repo root:
 
 ```bash
 bash preflight_papzin_agent.sh
 ```
 
-If you want to verify the model gateway before a real run, add the optional key check:
+Optional key check:
 
 ```bash
 bash preflight_papzin_agent.sh --check-key
 ```
 
 Success criteria:
-- `.env.local` exists
-- `EMAIL_GAME_AGENT_NAME` is exactly `letlhogonolo_fanampe`
-- `EMAIL_GAME_SERVER` is set
-- `my_agent.py` compiles
-- the allowed model verifier passes if you asked for it
+- `.env.local` exists locally.
+- `EMAIL_GAME_AGENT_NAME` is exactly `letlhogonolo_fanampe`.
+- `EMAIL_GAME_SERVER` is configured locally.
+- `my_agent.py` compiles.
+- allowed model verification passes when requested.
 
-## 2) Confirm the agent name
+## Starting the Agent
 
-The competition name must be exactly:
-
-```text
-letlhogonolo_fanampe
-```
-
-Do not change the spelling, underscores, or casing.
-
-## 3) Run the agent
-
-Use the launch helper from the repo root:
+Preferred helper:
 
 ```bash
 bash run_papzin_agent.sh
 ```
 
-That helper runs:
+In the current long-running setup, the live agent runs inside tmux. Do not start a second agent if one is already running.
+
+Check running processes without exposing secrets:
 
 ```bash
-./.venv/bin/python scripts/run_custom_agent.py "$EMAIL_GAME_AGENT_NAME" --module my_agent.py --server "$EMAIL_GAME_SERVER"
+pgrep -af 'scripts/run_custom_agent.py letlhogonolo_fanampe|monitor_emailgame_telegram.py'
 ```
 
-## 4) Logs to watch
+## Stopping and Restarting
 
-Watch for these startup lines:
-- the agent loading `my_agent.py`
-- the model and endpoint banner
-- queue position updates
+Stop or restart the agent only between matches.
+
+Use Telegram controls when possible:
+- `/stopagent`
+- `/startagent`
+- `/restartagent`
+
+Do not force stop the process during an active match unless Papzin explicitly accepts the risk.
+
+The monitor can be restarted independently when monitor code changes. Restarting the monitor must not restart the live agent.
+
+## What to Watch
+
+Useful live signals:
 - moderator messages for each round
-- signature request / submission logs
-- any auth or connection failure from startup
+- request target extraction
+- signature requests sent
+- signed replies received
+- submitted signatures
+- action completion reminders
+- leaderboard score and rank movement
 
-Useful signals:
-- `Joined matchmaking queue`
-- `connected, in the ladder queue, waiting for a game`
-- `Round ...`
-- `Submitted received signature`
-- `Signed request from ...`
+Expected submission logs include:
+- `submitted signature for round X`
+- `skipped because stale`
+- `skipped because unauthorized`
+- `missing required signer`
 
-## 5) Stop safely
+## Key Learnings
 
-Stop the process with `Ctrl+C`.
+- Moderator messages should be processed before non-moderator messages.
+- Round 2 and Round 3 fanout was previously missed and has been fixed.
+- Signed-message submission needed stronger scanning and confirmation.
+- Monitor output needed Telegram-specific formatting and token redaction.
+- Leaderboard polling is useful for tracking competitiveness during live play.
+- The coach helps identify issues and recommendations without exposing raw log details.
 
-That should exit the agent cleanly without restarting anything.
+## Current Known Performance
 
-## 6) What not to do
+Recent observed state:
+- rank around `#5`
+- score improved from about `1578` to `1700+`
+- gap to `#4` has been shrinking
+- signature submissions are now observed
+- action reminders still sometimes appear and should remain monitored
 
-Avoid these because they waste the competition budget:
-- do not run repeated live restarts
-- do not keep relaunching after auth failures without fixing the env
-- do not change the agent name away from `letlhogonolo_fanampe`
-- do not print or paste the API key
-- do not edit `.env.local` during a live run unless you are intentionally fixing configuration
-- do not run extra live smoke tests unless you really need them
+## Recommended Operating Loop
 
-## 7) Quick troubleshooting
+1. Check `/status`.
+2. Check `/leaderboard`.
+3. Use `/coach` or `/recommend` for summarized next actions.
+4. Use `/reviewmatch` after recent matches.
+5. Use `/metrics` when investigating repeated reminders or missed submissions.
+6. Restart only the monitor after monitor-only code changes.
+7. Restart the agent only between matches.
 
-### Queue timeout
-Possible causes:
-- the server is temporarily busy
-- the server URL is wrong
-- the agent never reached the queue
-
-What to check:
-- confirm `EMAIL_GAME_SERVER` is set in `.env.local`
-- rerun the preflight helper
-- try the launch helper once more after verifying the server URL
-
-### Connection timeout
-Possible causes:
-- the server URL is unreachable
-- the network path is down
-- the host is temporarily unavailable
-
-What to check:
-- confirm `EMAIL_GAME_SERVER` is correct
-- verify the local environment and network
-- retry once after the issue is corrected
-
-### Auth failure
-Possible causes:
-- the key does not match the issued competition identity
-- the agent name is not exactly `letlhogonolo_fanampe`
-- the gateway is unavailable or misconfigured
-
-What to check:
-- confirm `EMAIL_GAME_AGENT_NAME=letlhogonolo_fanampe`
-- rerun `bash preflight_papzin_agent.sh --check-key`
-- confirm the launch helper is sourcing the local `.env.local`
-
-## 8) Recommended order
-
-1. `bash preflight_papzin_agent.sh`
-2. `bash run_papzin_agent.sh`
-3. Watch the logs and let the agent run
-4. Stop with `Ctrl+C` when you are done
