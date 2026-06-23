@@ -139,6 +139,7 @@ class CustomAgent(BaseAgent):
                 )
                 return True
             self.current_round = parsed_round
+            self._drop_stale_pending_signature_requests()
 
         assigned = self._extract_first_labeled_value(body, _ASSIGNED_PATTERNS)
         request_targets = self._extract_agent_list(body, _REQUEST_PATTERNS, require_explicit=True)
@@ -206,6 +207,14 @@ class CustomAgent(BaseAgent):
         if not signed_message:
             if "signed" in str(message.get("subject", "") or "").lower():
                 logger.info("Signed subject seen but payload could not be parsed; falling back to BaseAgent")
+                self._log_signed_payload_decision(
+                    round_id=self.current_round,
+                    signer="<unknown>",
+                    assignment_matched=False,
+                    submit_attempted=False,
+                    submit_succeeded=False,
+                    skipped_reason="parse failed",
+                )
             return False
 
         original_message = str(signed_message.get("original_message", ""))
@@ -213,6 +222,11 @@ class CustomAgent(BaseAgent):
         signed_for = self._normalize_agent_id(str(signed_message.get("signed_for", "")))
         pending_signers = self._pending_signature_requests.get(original_message)
         pending_round = self._pending_signature_rounds.get(original_message, self.current_round)
+        assignment_matched = bool(
+            original_message
+            and original_message == self.current_assigned_message
+            and pending_round == self.current_round
+        )
         logger.info(
             "Received signed payload: signer=%s signed_for=%s original=%r current=%r pending=%s",
             signer or "<unknown>",
@@ -221,6 +235,61 @@ class CustomAgent(BaseAgent):
             self.current_assigned_message,
             sorted(pending_signers) if pending_signers else [],
         )
+        key = (
+            signer,
+            signed_for,
+            original_message,
+        )
+        if key in self._submitted_signature_keys:
+            logger.info("Duplicate signed payload ignored: %s -> %s", key[0], key[1])
+            self._log_signed_payload_decision(
+                round_id=pending_round,
+                signer=signer or "<unknown>",
+                assignment_matched=assignment_matched,
+                submit_attempted=False,
+                submit_succeeded=False,
+                skipped_reason="duplicate",
+            )
+            return True
+        if not original_message or not signer:
+            self._log_signed_payload_decision(
+                round_id=pending_round,
+                signer=signer or "<unknown>",
+                assignment_matched=assignment_matched,
+                submit_attempted=False,
+                submit_succeeded=False,
+                skipped_reason="parse failed",
+            )
+            return True
+        if signed_for and signed_for != self.agent_id:
+            logger.warning("Skipped because unauthorized: signature was for unexpected recipient %s", signed_for)
+            self._log_signed_payload_decision(
+                round_id=pending_round,
+                signer=signer or "<unknown>",
+                assignment_matched=assignment_matched,
+                submit_attempted=False,
+                submit_succeeded=False,
+                skipped_reason="unauthorized",
+            )
+            return True
+        if pending_round != self.current_round:
+            logger.info(
+                "Skipped because stale: signed payload for round %s while current round is %s signer=%s signed_for=%s original=%r",
+                pending_round,
+                self.current_round,
+                signer or "<unknown>",
+                signed_for or "<unknown>",
+                original_message,
+            )
+            self._log_signed_payload_decision(
+                round_id=pending_round,
+                signer=signer or "<unknown>",
+                assignment_matched=assignment_matched,
+                submit_attempted=False,
+                submit_succeeded=False,
+                skipped_reason="stale",
+            )
+            return True
         if not pending_signers:
             logger.info(
                 "Skipped because stale: signed payload for untracked message signer=%s signed_for=%s original=%r current=%r",
@@ -229,7 +298,15 @@ class CustomAgent(BaseAgent):
                 original_message,
                 self.current_assigned_message,
             )
-            return False
+            self._log_signed_payload_decision(
+                round_id=pending_round,
+                signer=signer or "<unknown>",
+                assignment_matched=assignment_matched,
+                submit_attempted=False,
+                submit_succeeded=False,
+                skipped_reason="stale",
+            )
+            return True
         if signer not in pending_signers:
             logger.warning(
                 "Skipped because missing required signer: got %s for message %r, pending=%s",
@@ -237,18 +314,14 @@ class CustomAgent(BaseAgent):
                 original_message,
                 sorted(pending_signers),
             )
-            return False
-        if signed_for and signed_for != self.agent_id:
-            logger.warning("Skipped because unauthorized: signature was for unexpected recipient %s", signed_for)
-            return False
-
-        key = (
-            signer,
-            signed_for,
-            original_message,
-        )
-        if key in self._submitted_signature_keys:
-            logger.info("Duplicate signed payload ignored: %s -> %s", key[0], key[1])
+            self._log_signed_payload_decision(
+                round_id=pending_round,
+                signer=signer or "<unknown>",
+                assignment_matched=assignment_matched,
+                submit_attempted=False,
+                submit_succeeded=False,
+                skipped_reason=f"missing required signer: {signer or '<unknown>'}",
+            )
             return True
 
         logger.info(
@@ -266,9 +339,60 @@ class CustomAgent(BaseAgent):
                 self._pending_signature_rounds.pop(original_message, None)
             logger.info("Submitted received signature from %s", key[0])
             logger.info("submitted signature for round %s from %s", pending_round, key[0])
+            self._log_signed_payload_decision(
+                round_id=pending_round,
+                signer=signer or "<unknown>",
+                assignment_matched=assignment_matched,
+                submit_attempted=True,
+                submit_succeeded=True,
+                skipped_reason="none",
+            )
         else:
             logger.warning("Signature submission failed for %s -> %s", key[0], key[1])
+            self._log_signed_payload_decision(
+                round_id=pending_round,
+                signer=signer or "<unknown>",
+                assignment_matched=assignment_matched,
+                submit_attempted=True,
+                submit_succeeded=False,
+                skipped_reason="submission failed",
+            )
         return True
+
+    def _drop_stale_pending_signature_requests(self) -> None:
+        stale_messages = [
+            message
+            for message, round_id in self._pending_signature_rounds.items()
+            if round_id < self.current_round
+        ]
+        for message in stale_messages:
+            round_id = self._pending_signature_rounds.pop(message, None)
+            self._pending_signature_requests.pop(message, None)
+            logger.info(
+                "Skipped because stale: clearing pending signatures for round %s after entering round %s",
+                round_id,
+                self.current_round,
+            )
+
+    @staticmethod
+    def _log_signed_payload_decision(
+        *,
+        round_id: int,
+        signer: str,
+        assignment_matched: bool,
+        submit_attempted: bool,
+        submit_succeeded: bool,
+        skipped_reason: str,
+    ) -> None:
+        logger.info(
+            "Signed payload decision: current_round=%s signer=%s assignment_matched=%s submit_attempted=%s submit_succeeded=%s skipped_reason=%s",
+            round_id,
+            signer,
+            "yes" if assignment_matched else "no",
+            "yes" if submit_attempted else "no",
+            "yes" if submit_succeeded else "no",
+            skipped_reason,
+        )
 
     def _maybe_handle_signature_request(self, message: Dict) -> bool:
         body = str(message.get("body", "") or "")

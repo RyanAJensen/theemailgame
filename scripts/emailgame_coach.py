@@ -559,6 +559,11 @@ class EmailGameCoach:
                 self._append_to_round(current, current_round_id, "signed_requests_sent", signed_request.group(1).strip())
                 continue
 
+            received_signed_payload = re.search(r"Received signed payload: signer=([^ ]+)", line, re.IGNORECASE)
+            if received_signed_payload:
+                self._append_to_round(current, current_round_id, "signed_replies_received", received_signed_payload.group(1).strip())
+                continue
+
             submitted = re.search(r"submitted signature for round (\d+) from ([^ ]+)", line, re.IGNORECASE)
             if submitted:
                 round_metrics = self._round(current, submitted.group(1))
@@ -660,14 +665,7 @@ class EmailGameCoach:
         )
 
     def _looks_like_signed_reply(self, subject_lower: str) -> bool:
-        if any(word in subject_lower for word in ("clarification", "reminder", "authorization")):
-            return False
-        return (
-            "signed message" in subject_lower
-            or "signature request response" in subject_lower
-            or subject_lower.startswith("re: signature request")
-            or subject_lower.startswith("re: request for signature")
-        )
+        return False
 
     def _sorted_rounds(self, match: MatchMetrics) -> List[Tuple[str, RoundMetrics]]:
         return sorted(match.rounds.items(), key=lambda item: (0, int(item[0])) if item[0].isdigit() else (1, item[0]))

@@ -8,7 +8,9 @@ starting the live Email Game runner.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+from io import StringIO
 from types import SimpleNamespace
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -120,6 +122,11 @@ def assert_equal(left, right, message):
 
 
 def main() -> None:
+    log_stream = StringIO()
+    handler = logging.StreamHandler(log_stream)
+    logging.getLogger("my_agent").addHandler(handler)
+    logging.getLogger("my_agent").setLevel(logging.INFO)
+
     agent = make_agent()
 
     assigned_round1 = "Alpha  beta; keep the exact spacing."
@@ -157,7 +164,7 @@ def main() -> None:
     round2 = moderator_message(
         2,
         assigned_round2,
-        ["dave"],
+        ["dave", "erin"],
         ["erin"],
         auth_line="You may sign messages for",
     )
@@ -165,14 +172,18 @@ def main() -> None:
     agent.on_message_batch([round2])
     assert_equal(agent.current_round, 2, "round 2 tracking")
     assert_equal(agent.current_assigned_message, assigned_round2, "round 2 assigned message")
-    assert_equal(len(agent._events["sent"]), 3, "round 2 request fanout")
+    assert_equal(len(agent._events["sent"]), 4, "round 2 request fanout")
 
     agent.on_message_batch([round1])
-    assert_equal(len(agent._events["sent"]), 3, "stale previous-round moderator message ignored")
+    assert_equal(len(agent._events["sent"]), 4, "stale previous-round moderator message ignored")
 
     delayed_reply = signed_payload_message("bob", assigned_round1)
     agent.on_message_batch([delayed_reply])
-    assert_equal(len(agent._events["submitted"]), 2, "delayed previous-round signature accepted once")
+    assert_equal(len(agent._events["submitted"]), 1, "stale round 1 signature ignored during round 2")
+
+    round2_reply = signed_payload_message("dave", assigned_round2, subject="Signature Request Response")
+    agent.on_message_batch([round2_reply])
+    assert_equal(len(agent._events["submitted"]), 2, "round 2 signature request response submitted")
 
     tampered_reply = signed_payload_message(
         "bob",
@@ -183,6 +194,44 @@ def main() -> None:
     agent.on_message_batch([tampered_reply])
     assert_equal(len(agent._events["submitted"]), 2, "tampered signed payload rejected")
 
+    assigned_round3 = "Charlie message for final round handling."
+    round3 = moderator_message(
+        3,
+        assigned_round3,
+        ["frank", "george"],
+        ["alice"],
+    )
+    agent.on_message_batch([round3])
+    assert_equal(agent.current_round, 3, "round 3 tracking")
+    assert_equal(agent.current_assigned_message, assigned_round3, "round 3 assigned message")
+    assert_equal(len(agent._events["sent"]), 6, "round 3 request fanout")
+
+    stale_round2_reply = signed_payload_message("erin", assigned_round2)
+    agent.on_message_batch([stale_round2_reply])
+    assert_equal(len(agent._events["submitted"]), 2, "stale round 2 reply ignored during round 3")
+
+    round3_reply = signed_payload_message("frank", assigned_round3, subject="Re: Signature Request")
+    agent.on_message_batch([round3_reply])
+    assert_equal(len(agent._events["submitted"]), 3, "round 3 signed reply submitted once")
+
+    round3_duplicate = signed_payload_message("frank", assigned_round3, subject="Signature Request Response")
+    agent.on_message_batch([round3_duplicate])
+    assert_equal(len(agent._events["submitted"]), 3, "round 3 duplicate signed reply ignored after submission")
+
+    missing_signer_reply = signed_payload_message("mallory", assigned_round3)
+    agent.on_message_batch([missing_signer_reply])
+    assert_equal(len(agent._events["submitted"]), 3, "round 3 missing signer skipped")
+
+    log_text = log_stream.getvalue()
+    if "Signed payload decision: current_round=3 signer=frank assignment_matched=yes submit_attempted=yes submit_succeeded=yes skipped_reason=none" not in log_text:
+        raise AssertionError("submitted signature decision log missing for coach metrics")
+    if "skipped_reason=duplicate" not in log_text:
+        raise AssertionError("duplicate signed payload decision log missing")
+    if "skipped_reason=stale" not in log_text:
+        raise AssertionError("stale signed payload decision log missing")
+    if "missing required signer: mallory" not in log_text:
+        raise AssertionError("missing-required-signer decision log does not include signer")
+
     duplicate_round1 = request_message(
         "mallory",
         f"Please sign this message for me: {assigned_round1}",
@@ -190,9 +239,10 @@ def main() -> None:
     agent.current_authorized_signers = ["carol"]
     agent.current_authorized_descriptions = []
     agent.current_authorization_resolved = ["carol"]
+    sent_before_decline = len(agent._events["sent"])
     agent.on_message_batch([duplicate_round1])
     assert_equal(len(agent._events["signed"]), 0, "unauthorized request should never be signed")
-    assert_equal(len(agent._events["sent"]), 4, "unauthorized request gets one decline message")
+    assert_equal(len(agent._events["sent"]), sent_before_decline + 1, "unauthorized request gets one decline message")
     assert_equal(agent._events["sent"][-1]["to_agent"], "mallory", "unauthorized request decline target")
 
     agent.on_new_game()
