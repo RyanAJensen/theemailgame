@@ -12,3 +12,8 @@ venv/
 session_results/
 agent_logs/
 current_game_*.json
+
+# Private Papzin Email Game notes
+AGENT_CHANGELOG.md
+STRATEGY_NOTES.md
+MATCH_REVIEW.md
