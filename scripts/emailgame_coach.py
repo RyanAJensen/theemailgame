@@ -246,6 +246,22 @@ class EmailGameCoach:
 
     def telegram_coach_text(self) -> str:
         analysis = self.analyze(persist=True)
+        if analysis.latest_log_stale:
+            lines = [
+                "Email Game Coach",
+                "",
+                f"Rank: #{analysis.rank}" if analysis.rank is not None else "Rank: n/a",
+                f"Score trend: {_score_delta_text(analysis.deltas.get(30))} in 30m",
+                f"Gap to #4: {analysis.gap_to_four if analysis.gap_to_four is not None else 'n/a'}",
+                f"Gap to #1: {analysis.gap_to_one if analysis.gap_to_one is not None else 'n/a'}",
+                "",
+                "Monitoring stale: yes",
+                "Diagnosis: local match summaries are withheld until the live log stream is fresh.",
+                "",
+                "Next recommendation:",
+                analysis.recommendation_title,
+            ]
+            return self._html(lines)
         latest = analysis.matches[-3:]
         lines = [
             "Email Game Coach",
@@ -292,6 +308,18 @@ class EmailGameCoach:
 
     def telegram_reviewmatch_text(self) -> str:
         analysis = self.analyze(persist=True)
+        if analysis.latest_log_stale:
+            return self._html(
+                [
+                    "Latest Match Diagnosis",
+                    "",
+                    "Monitoring stale: yes",
+                    "Match diagnosis is withheld until the live log stream is fresh.",
+                    "",
+                    "Next recommendation:",
+                    analysis.recommendation_title,
+                ]
+            )
         match = analysis.matches[-1] if analysis.matches else None
         if match is None:
             return "No match diagnosis available yet."

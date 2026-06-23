@@ -321,6 +321,7 @@ class RoundSummary:
     round_id: str
     started_at: datetime
     requested_from: List[str] = field(default_factory=list)
+    request_targets: Optional[int] = None
     received_from: List[str] = field(default_factory=list)
     signed_from: List[str] = field(default_factory=list)
     submitted: Optional[bool] = None
@@ -341,6 +342,8 @@ class LogStreamStatus:
     exists: bool
     age_seconds: Optional[float]
     stale: bool
+    pane_age_seconds: Optional[float] = None
+    pane_observed: bool = False
     reconnected: bool = False
     reconnect_error: str = ""
 
@@ -671,6 +674,7 @@ class EmailGameMonitor:
             entry = ObservedLine.from_json(raw)
             if entry is not None:
                 self._observed_lines.append(entry)
+                self._line_buffer.append(entry.text)
 
     def _record_line(self, text: str, ts: Optional[datetime] = None) -> ObservedLine:
         entry = ObservedLine(ts=ts or _now_sast(), text=_redact(text).strip())
@@ -687,6 +691,7 @@ class EmailGameMonitor:
                 if line:
                     lines.append(line)
         for line in lines[-MAX_OBSERVED_LINES:]:
+            self._line_buffer.append(line)
             self._record_line(line)
         self._persist_state()
 
@@ -715,6 +720,21 @@ class EmailGameMonitor:
             return max(0.0, time.time() - self.log_file.stat().st_mtime)
         except OSError:
             return None
+
+    def _log_file_mtime_text(self) -> str:
+        if not self.log_file.exists():
+            return "missing"
+        try:
+            mtime = datetime.fromtimestamp(self.log_file.stat().st_mtime, tz=timezone.utc).astimezone(SAST_TZ)
+        except OSError:
+            return "unavailable"
+        return mtime.strftime("%H:%M:%S SAST")
+
+    def _latest_observed_age_seconds(self) -> Optional[float]:
+        latest = self._latest_significant_entry()
+        if latest is None:
+            return None
+        return max(0.0, (_now_sast() - latest.ts).total_seconds())
 
     def _format_age(self, seconds: Optional[float]) -> str:
         if seconds is None:
@@ -775,6 +795,8 @@ class EmailGameMonitor:
             exists=self.log_file.exists(),
             age_seconds=age_seconds,
             stale=stale,
+            pane_age_seconds=self._latest_observed_age_seconds(),
+            pane_observed=bool(self._observed_lines),
             reconnected=reconnected,
             reconnect_error=reconnect_error,
         )
@@ -1249,6 +1271,7 @@ class EmailGameMonitor:
                 "✅ <b>Log pipe reconnected</b>\n\n"
                 f"Pane: <code>{html_escape(pane_id, quote=False)}</code>\n"
                 f"PID: <code>{html_escape(pane_pid_text, quote=False)}</code>\n"
+                f"Log mtime: <b>{html_escape(self._log_file_mtime_text(), quote=False)}</b>\n"
                 f"Log freshness: <b>{html_escape(self._format_age(status.age_seconds), quote=False)}</b>"
             )
         if reconnect_error:
@@ -1256,12 +1279,14 @@ class EmailGameMonitor:
                 "⚠️ <b>Log pipe reconnect failed</b>\n\n"
                 f"Pane: <code>{html_escape(pane_id, quote=False)}</code>\n"
                 f"PID: <code>{html_escape(pane_pid_text, quote=False)}</code>\n"
+                f"Log mtime: <b>{html_escape(self._log_file_mtime_text(), quote=False)}</b>\n"
                 f"Error: <code>{html_escape(_clean_log_text(reconnect_error), quote=False)}</code>"
             )
         return (
             "⚠️ <b>Log pipe reconnect had no result</b>\n\n"
             f"Pane: <code>{html_escape(pane_id, quote=False)}</code>\n"
             f"PID: <code>{html_escape(pane_pid_text, quote=False)}</code>\n"
+            f"Log mtime: <b>{html_escape(self._log_file_mtime_text(), quote=False)}</b>\n"
             f"Log freshness: <b>{html_escape(self._format_age(status.age_seconds), quote=False)}</b>"
         )
 
@@ -1284,10 +1309,15 @@ class EmailGameMonitor:
         reminder_count = sum(round_summary.reminders for round_summary in summary.rounds.values()) if summary else 0
         pane_id = _tmux_pane_id(TMUX_SESSION_AGENT) or "unknown"
         pane_pid = _tmux_pane_pid(TMUX_SESSION_AGENT)
-        source = "tmux pane capture" if log_status.stale else "live log file"
+        pane_fresh = bool(
+            log_status.pane_observed
+            and log_status.pane_age_seconds is not None
+            and log_status.pane_age_seconds <= STALE_LOG_THRESHOLD_SEC
+        )
+        source = "live log file" if not log_status.stale else ("tmux pane capture" if pane_fresh else "stale log file")
         warning_lines: List[str] = []
         if log_status.stale:
-            warning_lines.append("⚠️ Log stream stale — reconnecting tmux pipe")
+            warning_lines.append("⚠️ Live log file stale; monitor is using pane capture" if pane_fresh else "⚠️ Log stream stale")
             if log_status.reconnected:
                 warning_lines.append("✅ tmux pipe reattached")
             elif log_status.reconnect_error:
@@ -1301,6 +1331,9 @@ class EmailGameMonitor:
             f"State: {state_icon} <b>{html_escape(state_label, quote=False)}</b>",
             f"State source: <b>{html_escape(source, quote=False)}</b>",
             f"Log freshness: <b>{html_escape(self._format_age(log_status.age_seconds), quote=False)}</b>",
+            f"Log mtime: <b>{html_escape(self._log_file_mtime_text(), quote=False)}</b>",
+            f"Pane observed freshness: <b>{html_escape(self._format_age(log_status.pane_age_seconds), quote=False)}</b>",
+            f"Pipe reconnected: <b>{'yes' if log_status.reconnected else 'no'}</b>",
             f"Pane: <code>{html_escape(pane_id, quote=False)}</code> / PID <code>{html_escape(str(pane_pid) if pane_pid else 'unknown', quote=False)}</code>",
             f"Latest round: <b>{html_escape(round_text, quote=False)}</b>",
             f"Updated: <b>{html_escape(updated, quote=False)}</b>",
@@ -1770,6 +1803,11 @@ class EmailGameMonitor:
                 current_round_id = round_id
                 self._round_entry(summary, round_id, entry.ts)
 
+            round_targets_match = re.search(r"\[INFO\]\s*Round\s+(\d+):.*request_targets=(\d+)", line, re.IGNORECASE)
+            if round_targets_match:
+                round_summary = self._round_entry(summary, round_targets_match.group(1), entry.ts)
+                round_summary.request_targets = int(round_targets_match.group(2))
+
             if "Sent signature request to " in line:
                 agent = line.rsplit("Sent signature request to ", 1)[-1].strip()
                 if current_round_id:
@@ -1800,6 +1838,22 @@ class EmailGameMonitor:
             submit_match = re.search(r"Submitted received signature from ([^ ]+)", line, re.IGNORECASE)
             if submit_match:
                 agent = submit_match.group(1).strip()
+                round_summary = self._submission_round_entry(summary, current_round_id, agent, entry.ts)
+                if round_summary is not None:
+                    round_summary.submitted = True
+                    self._append_unique(round_summary.signed_from, agent)
+                continue
+
+            submit_round_match = re.search(r"submitted signature for round (\d+) from ([^ ]+)", line, re.IGNORECASE)
+            if submit_round_match:
+                round_summary = self._round_entry(summary, submit_round_match.group(1), entry.ts)
+                round_summary.submitted = True
+                self._append_unique(round_summary.signed_from, submit_round_match.group(2).strip())
+                continue
+
+            submitting_match = re.search(r"Submitting signed payload from ([^ ]+)", line, re.IGNORECASE)
+            if submitting_match:
+                agent = submitting_match.group(1).strip()
                 round_summary = self._submission_round_entry(summary, current_round_id, agent, entry.ts)
                 if round_summary is not None:
                     round_summary.submitted = True
@@ -1837,6 +1891,15 @@ class EmailGameMonitor:
             return "none"
         return ", ".join(html_escape(self._display_agent_label(agent), quote=False) for agent in agents)
 
+    def _format_requested_agents(self, round_summary: RoundSummary) -> str:
+        if round_summary.requested_from:
+            return self._format_agent_list(round_summary.requested_from)
+        if round_summary.request_targets:
+            target_count = html_escape(str(round_summary.request_targets), quote=False)
+            suffix = "target" if round_summary.request_targets == 1 else "targets"
+            return f"not captured in current tail (expected {target_count} {suffix})"
+        return "not observed"
+
     def _display_agent_label(self, agent_id: str) -> str:
         if agent_id in HOUSE_BOT_IDS:
             return f"{agent_id} (house bot)"
@@ -1851,7 +1914,7 @@ class EmailGameMonitor:
 
     def _round_summary_lines(self, round_summary: RoundSummary) -> List[str]:
         lines = [f"<b>Round {html_escape(round_summary.round_id, quote=False)}</b>"]
-        lines.append(f"📨 We requested signatures from: {self._format_agent_list(round_summary.requested_from)}")
+        lines.append(f"📨 We requested signatures from: {self._format_requested_agents(round_summary)}")
         lines.append(f"📥 Requests received from: {self._format_agent_list(round_summary.received_from)}")
         lines.append(f"✅ Signed replies received: {self._format_agent_list(round_summary.signed_from)}")
         lines.append(f"📤 Submitted to moderator: {self._format_yes_no_unknown(round_summary.submitted)}")
@@ -1883,7 +1946,7 @@ class EmailGameMonitor:
         reminder_round_count = 0
         for round_id, round_summary in rounds.items():
             lines.append(f"<b>Round {html_escape(round_id, quote=False)}</b>")
-            lines.append(f"📨 We requested signatures from: {self._format_agent_list(round_summary.requested_from)}")
+            lines.append(f"📨 We requested signatures from: {self._format_requested_agents(round_summary)}")
             lines.append(f"📥 Requests received from: {self._format_agent_list(round_summary.received_from)}")
             lines.append(f"✅ Signed replies received: {self._format_agent_list(round_summary.signed_from)}")
             lines.append(f"📤 Submitted to moderator: {self._format_yes_no_unknown(round_summary.submitted)}")
