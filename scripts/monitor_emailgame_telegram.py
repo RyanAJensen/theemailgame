@@ -26,6 +26,11 @@ from urllib.request import Request, urlopen
 from dotenv import load_dotenv
 
 try:
+    from emailgame_coach import EmailGameCoach
+except ModuleNotFoundError:  # pragma: no cover - supports module-style imports in tests.
+    from scripts.emailgame_coach import EmailGameCoach
+
+try:
     from zoneinfo import ZoneInfo
 except Exception:  # pragma: no cover - zoneinfo is available on modern Python, but keep fallback.
     ZoneInfo = None  # type: ignore[assignment]
@@ -814,6 +819,7 @@ class EmailGameMonitor:
                 self._telegram_send(message)
         self.leaderboard_state.last_snapshot = snapshot
         self._persist_leaderboard_state()
+        self._maybe_send_coach_alert("leaderboard")
 
         if had_failures:
             self.leaderboard_state.failure_alerted = False
@@ -848,7 +854,9 @@ class EmailGameMonitor:
             self.state.log_offset = 0
 
         if size == self.state.log_offset:
-            self._check_log_stream(reconnect=True, refresh_capture=True)
+            status = self._check_log_stream(reconnect=True, refresh_capture=True)
+            if status.stale:
+                self._maybe_send_coach_alert("log_stale")
             return
 
         with self.log_file.open("r", encoding="utf-8", errors="replace") as handle:
@@ -869,6 +877,10 @@ class EmailGameMonitor:
             event = self._classify(line)
             if event:
                 self._notify(event, observed_now)
+                if event.kind == "disconnected":
+                    self._maybe_send_coach_alert("disconnect")
+            elif "Action Completion Reminder" in line:
+                self._maybe_send_coach_alert("reminder")
 
     def _telegram_loop(self) -> None:
         if not self.telegram.enabled:
@@ -940,6 +952,14 @@ class EmailGameMonitor:
             return self._version_text()
         if command == "/preflight":
             return self._preflight_text()
+        if command == "/coach":
+            return self._coach_text()
+        if command == "/recommend":
+            return self._recommend_text()
+        if command == "/reviewmatch":
+            return self._reviewmatch_text()
+        if command == "/metrics":
+            return self._metrics_text()
         if command == "/startagent":
             return self._start_agent_text()
         if command == "/restartagent":
@@ -963,6 +983,10 @@ class EmailGameMonitor:
             "/reminders — same as /why\n"
             "/tail — raw redacted tail\n"
             "/leaderboard — current ranking\n"
+            "/coach — concise performance analysis\n"
+            "/recommend — next recommended Codex goal\n"
+            "/reviewmatch — latest match diagnosis\n"
+            "/metrics — numeric performance summary\n"
             "/reconnectlog — reconnect live log pipe\n"
             "/version — branch and commit\n"
             "/preflight — safe checks\n"
@@ -973,6 +997,34 @@ class EmailGameMonitor:
     def _telegram_send(self, message: str) -> None:
         for chunk in _chunk_text(message):
             self.telegram.send(chunk, parse_mode=TELEGRAM_PARSE_MODE)
+
+    def _coach(self) -> EmailGameCoach:
+        return EmailGameCoach(
+            log_file=self.log_file,
+            monitor_state_file=self.state_file,
+            leaderboard_state_file=self.leaderboard_state_file,
+        )
+
+    def _coach_text(self) -> str:
+        return self._coach().telegram_coach_text()
+
+    def _recommend_text(self) -> str:
+        return self._coach().telegram_recommend_text()
+
+    def _reviewmatch_text(self) -> str:
+        return self._coach().telegram_reviewmatch_text()
+
+    def _metrics_text(self) -> str:
+        return self._coach().telegram_metrics_text()
+
+    def _maybe_send_coach_alert(self, reason: str) -> None:
+        try:
+            message = self._coach().maybe_alert_text(reason)
+        except Exception as exc:
+            print(f"[monitor] coach analysis failed: {_redact(str(exc))}")
+            return
+        if message:
+            self._telegram_send(message)
 
     def _notify(self, event: Event, ts: Optional[datetime] = None) -> None:
         key = (event.kind, event.text)
