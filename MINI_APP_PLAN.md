@@ -2,6 +2,8 @@
 
 This is a plan only. Do not build the mini app until Papzin asks.
 
+The roadmap tracking item is in `ROADMAP.md` under `Telegram Mini App Dashboard`.
+
 ## Goal
 
 Create a safe Telegram Mini App that gives Papzin a compact operational dashboard for the Email Game agent, monitor, leaderboard, and coach recommendations.
@@ -106,4 +108,3 @@ Safe-control endpoints should wait until Phase 3 and should require explicit aut
 4. Validate redaction and authorization boundaries.
 5. Add Telegram WebApp launch.
 6. Add safe controls only after read-only usage is stable.
-

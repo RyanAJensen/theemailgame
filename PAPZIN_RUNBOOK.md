@@ -129,6 +129,10 @@ Do not force stop the process during an active match unless Papzin explicitly ac
 
 The monitor can be restarted independently when monitor code changes. Restarting the monitor must not restart the live agent.
 
+## Mini App Dashboard
+
+A Telegram Mini App dashboard is planned in `ROADMAP.md`, with details in `MINI_APP_PLAN.md`. For now, the Telegram bot remains the command cockpit for status, leaderboard, coach summaries, and safe controls.
+
 ## What to Watch
 
 Useful live signals:
@@ -173,4 +177,3 @@ Recent observed state:
 5. Use `/metrics` when investigating repeated reminders or missed submissions.
 6. Restart only the monitor after monitor-only code changes.
 7. Restart the agent only between matches.
-
