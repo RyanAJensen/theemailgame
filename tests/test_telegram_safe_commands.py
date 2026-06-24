@@ -15,6 +15,7 @@ def test_coach_is_authorized_for_tester_bot_only():
     assert monitor._is_authorized_bot_to_bot_message(tester_message, "/dashboard") is True
     assert monitor._is_authorized_bot_to_bot_message(tester_message, "/dashboard_url") is True
     assert monitor._is_authorized_bot_to_bot_message(tester_message, "/dashboard_refresh") is True
+    assert monitor._is_authorized_bot_to_bot_message(tester_message, "/tester_status") is True
     assert monitor._is_authorized_bot_to_bot_message(tester_message, "/startagent") is False
     assert monitor._is_authorized_bot_to_bot_message(wrong_bot_message, "/coach") is False
     assert monitor._is_authorized_bot_to_bot_message(human_message, "/coach") is False
@@ -32,3 +33,9 @@ def test_dashboard_reply_markup_includes_button_when_link_exists(monkeypatch):
     assert reply_markup is not None
     assert reply_markup["inline_keyboard"][0][0]["text"] == "Open Race Control Dashboard"
     assert reply_markup["inline_keyboard"][0][0]["url"] == "https://example.trycloudflare.com/d/test-token/"
+
+
+def test_codex_help_redirects_to_bridge():
+    monitor = object.__new__(EmailGameMonitor)
+
+    assert "CodexBridgePapzinBot" in monitor._dispatch_command("/codex_help", [])

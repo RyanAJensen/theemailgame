@@ -67,10 +67,12 @@ HOUSE_BOT_IDS = {"house_bot_1", "house_bot_2", "house_bot_3"}
 BOT_TO_BOT_SAFE_COMMANDS = {
     "/help",
     "/coach",
+    "/codex_help",
     "/dashboard",
     "/dashboard_url",
     "/dashboard_refresh",
     "/dashboard_qa_report",
+    "/tester_status",
     "/status",
     "/logs",
     "/match",
@@ -1403,6 +1405,8 @@ class EmailGameMonitor:
     def _dispatch_command(self, command: str, args: List[str]) -> str:
         if command == "/help":
             return self._help_text()
+        if command == "/codex_help":
+            return "Use @CodexBridgePapzinBot for Codex operator commands."
         if command == "/dashboard":
             dashboard_url, refreshed = self._dashboard_tunnel_url(force_refresh=False)
             return self._dashboard_text(url=dashboard_url, refreshed=refreshed)
@@ -1413,6 +1417,8 @@ class EmailGameMonitor:
             return self._dashboard_text(url=dashboard_url, refreshed=refreshed)
         if command == "/dashboard_qa_report":
             return self._dashboard_qa_report_text()
+        if command == "/tester_status":
+            return self._tester_status_text()
         if command == "/status":
             return self._status_text()
         if command == "/logs":
@@ -1464,10 +1470,12 @@ class EmailGameMonitor:
             "/dashboard — open the race control dashboard\n"
             "/dashboard_refresh — refresh the dashboard tunnel\n"
             "/dashboard_qa_report — resend the latest QA screenshots\n"
+            "/tester_status — quick tester routing check\n"
             "/status — current state\n"
             "/startagent — start if idle\n"
             "/restartagent — safe restart\n"
             "/stopagent — stop only if safe\n\n"
+            "Use @CodexBridgePapzinBot for Codex operator commands.\n\n"
             "<b>Monitoring</b>\n"
             "/logs — latest match summary\n"
             "/match — latest match only\n"
@@ -1616,6 +1624,20 @@ class EmailGameMonitor:
         return (
             "Dashboard QA report resent.\n\n"
             f"<pre>{html_escape(stdout or 'No output.', quote=False)}</pre>"
+        )
+
+    def _tester_status_text(self) -> str:
+        report_chat = _env("EMAIL_GAME_TEST_REPORT_CHAT_ID")
+        tester_username = _env("EMAIL_GAME_TESTER_BOT_USERNAME") or DEFAULT_TESTER_BOT_USERNAME
+        return "\n".join(
+            [
+                "🧪 <b>Tester routing status</b>",
+                "",
+                f"Tester bot: <code>{html_escape(tester_username.lstrip('@'), quote=False)}</code>",
+                f"Report chat configured: {'yes' if report_chat else 'no'}",
+                f"Dashboard QA handler active: {'yes' if '/dashboard_qa_report' in BOT_TO_BOT_SAFE_COMMANDS else 'no'}",
+                f"Monitor session running: {'yes' if _tmux_has_session(TMUX_SESSION_MONITOR) else 'no'}",
+            ]
         )
 
     def _dashboard_text(self, url: str = "", refreshed: bool = False) -> str:
