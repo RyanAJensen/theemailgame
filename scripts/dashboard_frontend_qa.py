@@ -192,24 +192,30 @@ async def _capture_delivery_screenshots(browser: Any, url: str, force: bool) -> 
         has_touch=True,
         reduced_motion="no-preference",
     )
+    try:
+        await _capture_delivery_state(context, url, paths[0], None)
+        await _capture_delivery_state(context, url, paths[1], "you-focus")
+        await _capture_delivery_state(context, url, paths[2], "you-drag")
+        await _capture_delivery_state(context, url, paths[3], "rival-gap")
+    finally:
+        await context.close()
+    return [str(Path("dashboard_qa/screenshots") / name) for name in filenames]
+
+
+async def _capture_delivery_state(context: Any, url: str, path: Path, gesture: Optional[str]) -> None:
     page = await context.new_page()
     try:
         await page.goto(url, wait_until="networkidle", timeout=30000)
         await page.wait_for_timeout(1200)
-        await page.screenshot(path=str(paths[0]), full_page=False)
-        await _apply_delivery_gesture(page, "you-focus")
-        await page.screenshot(path=str(paths[1]), full_page=False)
-        await page.goto(url, wait_until="networkidle", timeout=30000)
-        await page.wait_for_timeout(1200)
-        await _apply_delivery_gesture(page, "you-drag")
-        await page.screenshot(path=str(paths[2]), full_page=False)
-        await page.goto(url, wait_until="networkidle", timeout=30000)
-        await page.wait_for_timeout(1200)
-        await _apply_delivery_gesture(page, "rival-gap")
-        await page.screenshot(path=str(paths[3]), full_page=False)
+        if gesture:
+            await _apply_delivery_gesture(page, gesture)
+        await page.screenshot(path=str(path), full_page=False)
+        if not path.exists():
+            await page.locator("body").screenshot(path=str(path))
+        if not path.exists():
+            raise RuntimeError(f"delivery screenshot not written: {path.name}")
     finally:
-        await context.close()
-    return [str(Path("dashboard_qa/screenshots") / name) for name in filenames]
+        await page.close()
 
 
 async def _qa_viewport(
@@ -976,12 +982,12 @@ def _telegram_send_document(token: str, chat_id: str, path: Path, caption: str =
 
 def _resolve_delivery_screenshots(result: QAResult) -> List[str]:
     if result.delivery_screenshots:
-        return result.delivery_screenshots[:3]
+        return result.delivery_screenshots[:4]
     delivery_files = sorted(SCREENSHOT_DIR.glob("delivery-*.png"))
     if delivery_files:
-        return [str(path.relative_to(PROJECT_ROOT)) for path in delivery_files[:3]]
+        return [str(path.relative_to(PROJECT_ROOT)) for path in delivery_files[:4]]
     if result.screenshots:
-        return result.screenshots[:3]
+        return result.screenshots[:4]
     return []
 
 
@@ -1060,7 +1066,7 @@ def _telegram_send(result: QAResult) -> Tuple[bool, str, Dict[str, Any]]:
         "YOU pod dragged",
         "Rival selected with gap line",
     ]
-    for index, item in enumerate(screenshot_paths[:3]):
+    for index, item in enumerate(screenshot_paths[:4]):
         caption = screenshot_labels[index] if index < len(screenshot_labels) else "Android dashboard screenshot"
         sent, screenshot_response, screenshot_error = _telegram_send_photo(token, chat_id, PROJECT_ROOT / item, caption=caption)
         fallback_used = False

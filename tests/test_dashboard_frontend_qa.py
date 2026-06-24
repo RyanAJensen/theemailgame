@@ -292,18 +292,18 @@ def test_telegram_send_writes_redacted_delivery_result(tmp_path, monkeypatch):
     assert sent is True
     assert error == ""
     assert delivery_result["summary_sent"] is True
-    assert delivery_result["screenshots_found"] == 3
-    assert delivery_result["screenshots_sent"] == 3
+    assert delivery_result["screenshots_found"] == 4
+    assert delivery_result["screenshots_sent"] == 4
     assert delivery_result["fallback_documents_sent"] == 1
     assert delivery_result["telegram_message_ids_received"] is True
-    assert len(photo_calls) == 3
+    assert len(photo_calls) == 4
     assert photo_calls[0][0] == "delivery-default.png"
     assert photo_calls[1][0] == "delivery-you-focused.png"
 
     stored = json.loads(qa.LAST_SEND_RESULT_PATH.read_text(encoding="utf-8"))
     assert stored["summary_sent"] is True
-    assert stored["screenshots_found"] == 3
-    assert stored["screenshots_sent"] == 3
+    assert stored["screenshots_found"] == 4
+    assert stored["screenshots_sent"] == 4
     assert stored["fallback_documents_sent"] == 1
     assert stored["telegram_message_ids_received"] is True
     assert stored["message_responses"][0]["message_id"] == 101
