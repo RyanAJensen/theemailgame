@@ -33,6 +33,7 @@ SAFE_COMMANDS = [
     "/coach",
     "/dashboard",
     "/dashboard_url",
+    "/dashboard_refresh",
     "/status",
     "/logs",
     "/match",

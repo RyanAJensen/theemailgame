@@ -31,6 +31,7 @@ COMMANDS: List[Dict[str, str]] = [
     {"command": "rank", "description": "my rank and gaps"},
     {"command": "dashboard", "description": "open race control dashboard"},
     {"command": "dashboard_url", "description": "dashboard link only"},
+    {"command": "dashboard_refresh", "description": "refresh dashboard tunnel"},
     {"command": "participants", "description": "leaderboard visibility"},
     {"command": "readiness", "description": "competition readiness report"},
     {"command": "budget", "description": "LLM budget and remaining estimate"},

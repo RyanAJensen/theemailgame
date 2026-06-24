@@ -68,6 +68,7 @@ BOT_TO_BOT_SAFE_COMMANDS = {
     "/coach",
     "/dashboard",
     "/dashboard_url",
+    "/dashboard_refresh",
     "/status",
     "/logs",
     "/match",
@@ -81,6 +82,10 @@ BOT_TO_BOT_SAFE_COMMANDS = {
     "/version",
 }
 DEFAULT_TESTER_BOT_USERNAME = "EmailGameTesterBot"
+DASHBOARD_URL_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-dashboard-url.txt"
+DASHBOARD_TUNNEL_LOG_FILE = PROJECT_ROOT / "agent_logs" / "emailgame-dashboard-tunnel.log"
+DASHBOARD_TUNNEL_SESSION = "emailgame-dashboard-tunnel"
+PUBLIC_DASHBOARD_URL_RE = re.compile(r"https?://[^\s<>\"]*trycloudflare\.com[^\s<>\"]*", re.IGNORECASE)
 
 OSC8_LINK_RE = re.compile(r"\x1b]8;;.*?\x1b\\")
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -160,6 +165,29 @@ def _read_text_file(path: Path) -> str:
         return path.read_text(encoding="utf-8").strip()
     except Exception:
         return ""
+
+
+def _write_text_file(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _extract_public_dashboard_url(text: str) -> str:
+    match = PUBLIC_DASHBOARD_URL_RE.search(text or "")
+    return match.group(0).rstrip(".,);]}>\"'") if match else ""
+
+
+def _build_protected_dashboard_url(base_url: str) -> str:
+    token = _read_text_file(PROJECT_ROOT / "agent_logs" / "emailgame-dashboard-token.txt")
+    if not base_url or not token:
+        return ""
+    return f"{base_url.rstrip('/')}/d/{token}/"
 
 
 def _now_sast() -> datetime:
@@ -1323,8 +1351,13 @@ class EmailGameMonitor:
         if command:
             reply_markup = None
             if command == "/dashboard":
-                response = self._dashboard_text()
-                reply_markup = self._dashboard_reply_markup()
+                dashboard_url, refreshed = self._dashboard_tunnel_url(force_refresh=False)
+                response = self._dashboard_text(url=dashboard_url, refreshed=refreshed)
+                reply_markup = self._dashboard_reply_markup(url=dashboard_url)
+            elif command == "/dashboard_refresh":
+                dashboard_url, refreshed = self._dashboard_tunnel_url(force_refresh=True)
+                response = self._dashboard_text(url=dashboard_url, refreshed=refreshed)
+                reply_markup = self._dashboard_reply_markup(url=dashboard_url)
             elif command == "/dashboard_url":
                 response = self._dashboard_url_text()
             else:
@@ -1367,9 +1400,13 @@ class EmailGameMonitor:
         if command == "/help":
             return self._help_text()
         if command == "/dashboard":
-            return self._dashboard_text()
+            dashboard_url, refreshed = self._dashboard_tunnel_url(force_refresh=False)
+            return self._dashboard_text(url=dashboard_url, refreshed=refreshed)
         if command == "/dashboard_url":
             return self._dashboard_url_text()
+        if command == "/dashboard_refresh":
+            dashboard_url, refreshed = self._dashboard_tunnel_url(force_refresh=True)
+            return self._dashboard_text(url=dashboard_url, refreshed=refreshed)
         if command == "/status":
             return self._status_text()
         if command == "/logs":
@@ -1419,6 +1456,7 @@ class EmailGameMonitor:
             "🎮 <b>Email Game Control</b>\n\n"
             "<b>Agent</b>\n"
             "/dashboard — open the race control dashboard\n"
+            "/dashboard_refresh — refresh the dashboard tunnel\n"
             "/status — current state\n"
             "/startagent — start if idle\n"
             "/restartagent — safe restart\n"
@@ -1482,8 +1520,65 @@ class EmailGameMonitor:
     def _coach_text(self) -> str:
         return self._coach().telegram_coach_text()
 
+    def _dashboard_tunnel_url(self, force_refresh: bool = False) -> Tuple[str, bool]:
+        url = _read_text_file(DASHBOARD_URL_FILE)
+        if url and not force_refresh and self._dashboard_url_is_alive(url):
+            return url, False
+        refreshed = self._refresh_dashboard_tunnel()
+        if refreshed:
+            return refreshed, True
+        return (url, False) if url else ("", False)
+
+    def _dashboard_url_is_alive(self, url: str) -> bool:
+        if not url:
+            return False
+        request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urlopen(request, timeout=10) as response:
+                status = int(getattr(response, "status", 200) or 200)
+                body = response.read(4096).decode("utf-8", "replace")
+        except Exception as exc:
+            status = int(getattr(exc, "code", 0) or 0)
+            body = ""
+            if hasattr(exc, "read"):
+                try:
+                    body = exc.read().decode("utf-8", "replace")
+                except Exception:
+                    body = ""
+        haystack = f"{status}\n{body}".lower()
+        if "error 1033" in haystack or "cloudflare error 1033" in haystack:
+            return False
+        return status == 200
+
+    def _wait_for_dashboard_url(self, timeout: int = 30) -> str:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if DASHBOARD_TUNNEL_LOG_FILE.exists():
+                url = _extract_public_dashboard_url(DASHBOARD_TUNNEL_LOG_FILE.read_text(encoding="utf-8", errors="replace"))
+                if url:
+                    return url
+            time.sleep(0.5)
+        return ""
+
+    def _refresh_dashboard_tunnel(self) -> str:
+        try:
+            DASHBOARD_TUNNEL_LOG_FILE.unlink()
+        except FileNotFoundError:
+            pass
+        start_result = _run_command(["bash", "scripts/start_emailgame_dashboard.sh"], timeout=30)
+        if start_result.returncode != 0 and not _tmux_has_session(DASHBOARD_TUNNEL_SESSION):
+            return ""
+        base_url = self._wait_for_dashboard_url(timeout=30)
+        if not base_url:
+            return ""
+        url = _build_protected_dashboard_url(base_url)
+        if not url:
+            return ""
+        _write_text_file(DASHBOARD_URL_FILE, url)
+        return url
+
     def _dashboard_url_text(self) -> str:
-        url = _read_text_file(PROJECT_ROOT / "agent_logs" / "emailgame-dashboard-url.txt")
+        url, _ = self._dashboard_tunnel_url(force_refresh=False)
         if not url:
             return (
                 "🏁 <b>Email Game Race Control</b>\n\n"
@@ -1495,11 +1590,25 @@ class EmailGameMonitor:
             f"Open dashboard:\n<code>{html_escape(url, quote=False)}</code>"
         )
 
-    def _dashboard_text(self) -> str:
-        return self._dashboard_url_text()
+    def _dashboard_text(self, url: str = "", refreshed: bool = False) -> str:
+        if not url:
+            return (
+                "🏁 <b>Email Game Race Control</b>\n\n"
+                "Dashboard link could not be refreshed yet.\n"
+                "Ask Codex to restart the tunnel."
+            )
+        if refreshed:
+            lead = "Dashboard link refreshed."
+        else:
+            lead = "Dashboard link is live."
+        return (
+            "🏁 <b>Email Game Race Control</b>\n\n"
+            f"{lead}\n"
+            "Tap Open Race Control Dashboard.\n"
+            f"Open dashboard:\n<code>{html_escape(url, quote=False)}</code>"
+        )
 
-    def _dashboard_reply_markup(self) -> Optional[Dict[str, object]]:
-        url = _read_text_file(PROJECT_ROOT / "agent_logs" / "emailgame-dashboard-url.txt")
+    def _dashboard_reply_markup(self, url: str = "") -> Optional[Dict[str, object]]:
         if not url:
             return None
         return {
