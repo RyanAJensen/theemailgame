@@ -38,6 +38,7 @@ _STOPWORDS = {
 }
 
 _ASSIGNED_PATTERNS = (
+    r"(?im)^\s*(?:[-*\d.)\s]*)?(?:you\s+must\s+get\s+signatures\s+for\s+this\s+exact\s+message)\s*(?:is|:|-|—)\s*(.+)$",
     r"(?im)^\s*(?:[-*\d.)\s]*)?(?:your|my|the)?\s*(?:assigned\s+)?message(?:\s+this\s+round)?\s*(?:is|:|-|—)\s*(.+)$",
     r"(?im)^\s*(?:[-*\d.)\s]*)?(?:exact\s+message|assigned\s+message|message\s+to\s+sign|message\s+you\s+must\s+sign|message\s+assigned\s+to\s+you)\s*(?:is|:|-|—)\s*(.+)$",
     r"(?im)^\s*(?:[-*\d.)\s]*)?(?:you\s+must\s+get\s+signatures\s+for\s+this\s+exact\s+message|you\s+must\s+request\s+signatures\s+for\s+this\s+exact\s+message)\s*(?:is|:|-|—)\s*(.+)$",
@@ -585,42 +586,39 @@ class CustomAgent(BaseAgent):
 
     @staticmethod
     def _extract_agent_list(body: str, patterns: Sequence[str], require_explicit: bool) -> List[str]:
-        for pattern in patterns:
-            match = re.search(pattern, body)
-            if not match:
-                continue
+        block = CustomAgent._extract_labeled_block(body, patterns)
+        if block is None:
+            return []
 
-            tail = CustomAgent._strip_wrapping_quotes(match.group(1).strip())
-            parts = [part.strip() for part in re.split(r"[,\n;]+", tail) if part.strip()]
-            if not parts:
-                continue
+        tail = CustomAgent._strip_wrapping_quotes(block.strip())
+        parts = [part.strip() for part in re.split(r"[,\n;]+", tail) if part.strip()]
+        if not parts:
+            return []
 
-            if require_explicit:
-                explicit = [part for part in parts if CustomAgent._looks_like_agent_id(part)]
-                if len(explicit) != len(parts):
-                    return []
-                return CustomAgent._normalize_agent_list(explicit)
+        normalized_parts = [CustomAgent._strip_list_marker(part) for part in parts]
+        if require_explicit:
+            explicit = [part for part in normalized_parts if CustomAgent._looks_like_agent_id(part)]
+            if len(explicit) != len(parts):
+                return []
+            return CustomAgent._normalize_agent_list(explicit)
 
-            return [part for part in parts if part]
-        return []
+        return [part for part in normalized_parts if part]
 
     @staticmethod
     def _extract_authorization_entries(body: str) -> Tuple[List[str], List[str]]:
-        for pattern in _AUTH_PATTERNS:
-            match = re.search(pattern, body)
-            if not match:
-                continue
+        block = CustomAgent._extract_labeled_block(body, _AUTH_PATTERNS)
+        if block is None:
+            return [], []
 
-            tail = CustomAgent._strip_wrapping_quotes(match.group(1).strip())
-            parts = [part.strip() for part in re.split(r"[,\n;]+", tail) if part.strip()]
-            if not parts:
-                continue
+        tail = CustomAgent._strip_wrapping_quotes(block.strip())
+        parts = [part.strip() for part in re.split(r"[,\n;]+", tail) if part.strip()]
+        if not parts:
+            return [], []
 
-            explicit = [part for part in parts if CustomAgent._looks_like_agent_id(part)]
-            descriptions = [part for part in parts if part not in explicit]
-            return CustomAgent._normalize_agent_list(explicit), descriptions
-
-        return [], []
+        normalized_parts = [CustomAgent._strip_list_marker(part) for part in parts]
+        explicit = [part for part in normalized_parts if CustomAgent._looks_like_agent_id(part)]
+        descriptions = [part for part in normalized_parts if part not in explicit]
+        return CustomAgent._normalize_agent_list(explicit), descriptions
 
     @staticmethod
     def _extract_requested_message(body: str) -> Optional[str]:
@@ -732,6 +730,37 @@ class CustomAgent(BaseAgent):
         while len(text) >= 2 and ((text[0] == text[-1] == '"') or (text[0] == text[-1] == "'") or (text[0] == text[-1] == "`")):
             text = text[1:-1].strip()
         return text
+
+    @staticmethod
+    def _strip_list_marker(value: str) -> str:
+        text = CustomAgent._strip_wrapping_quotes(value)
+        text = re.sub(r"^\s*(?:[-*•]|\d+[.)]|[A-Za-z][.)])\s*", "", text)
+        text = re.sub(r"\s*(?:[-–—:])\s*$", "", text).strip()
+        return text
+
+    @staticmethod
+    def _extract_labeled_block(body: str, patterns: Sequence[str]) -> Optional[str]:
+        lines = body.splitlines()
+        for index, line in enumerate(lines):
+            for pattern in patterns:
+                match = re.search(pattern, line)
+                if not match:
+                    continue
+                tail = match.group(1).strip()
+                collected = [tail] if tail else []
+                for continuation in lines[index + 1 :]:
+                    stripped = continuation.strip()
+                    if not stripped:
+                        break
+                    if stripped.startswith("**") and collected:
+                        break
+                    if re.match(r"^\d+[.)]\s+", stripped):
+                        lower = stripped.lower()
+                        if re.search(r"\b(you|request|requesting|authorized|authorised|sign|message|instructions|round)\b", lower):
+                            break
+                    collected.append(stripped)
+                return "\n".join(collected) if collected else None
+        return None
 
     @staticmethod
     def _clean_text(value: str) -> str:
