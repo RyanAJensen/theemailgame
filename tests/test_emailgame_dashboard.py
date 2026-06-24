@@ -18,8 +18,14 @@ def test_dashboard_requires_token_and_serves_protected_api():
     assert "Open Race Control Dashboard" not in root.text
     assert "Live Email Pod Race" in root.text
     assert "race-canvas" in root.text
+    assert "race-arena" in root.text
+    assert "track-pod" in root.text
+    assert "race-state-banner" in root.text
     assert "race-ticker" in root.text
     assert "Next target" in root.text
+    assert "table-scroll" in root.text
+    assert "<th>Score</th>" in root.text
+    assert "<th>Elo</th>" not in root.text
     assert "letlhogonolo_fanampe" in root.text
 
     health = client.get(f"/d/{token}/api/health")

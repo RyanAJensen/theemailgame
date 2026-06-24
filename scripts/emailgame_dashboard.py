@@ -367,6 +367,7 @@ def _race_hero_html(race: Dict[str, Any]) -> str:
     top_competitors = race.get("top_competitors") if isinstance(race.get("top_competitors"), list) else []
     story = race.get("story") if isinstance(race.get("story"), dict) else {}
     rows = []
+    pod_rows = []
     for item in top_competitors:
         if not isinstance(item, dict):
             continue
@@ -389,6 +390,21 @@ def _race_hero_html(race: Dict[str, Any]) -> str:
             f"<span class='racers-list__score'>{html_escape(str(score if score is not None else 'n/a'), quote=False)}</span>"
             "</li>"
         )
+        pod_classes = ["track-pod"]
+        if item.get("is_user"):
+            pod_classes.append("is-user")
+        elif is_bot:
+            pod_classes.append("is-bot")
+        short_name = "YOU" if item.get("is_user") else str(item.get("agent_id") or "rival").replace("house_bot_", "bot_")[:10]
+        pod_rows.append(
+            "<div class='" + " ".join(pod_classes) + "' "
+            f"style='--pod-index:{len(pod_rows)}; --pod-score:{html_escape(str(score if score is not None else 0), quote=True)};'>"
+            f"<span class='track-pod__badge'>#{html_escape(str(item.get('rank') or ''), quote=False)}</span>"
+            "<span class='track-pod__body'></span>"
+            f"<span class='track-pod__label'>{html_escape(short_name, quote=False)}</span>"
+            f"<span class='track-pod__score'>{html_escape(str(score if score is not None else 'n/a'), quote=False)}</span>"
+            "</div>"
+        )
 
     user_rank = race.get("rank")
     user_score = race.get("score")
@@ -399,14 +415,35 @@ def _race_hero_html(race: Dict[str, Any]) -> str:
         for chip in (story.get("chips") if isinstance(story.get("chips"), list) else [])
     )
     ticker = story.get("ticker") or "LIVE RACE FEED · Waiting for leaderboard data"
+    target_name = str(story.get("target_name") or "next rival")
+    need_to_clear = story.get("need_to_clear")
+    banner_action = (
+        f"need +{need_to_clear} point{'s' if need_to_clear != 1 else ''} to clear {target_name}"
+        if isinstance(need_to_clear, int)
+        else str(story.get("next_gap_text") or "Next target n/a")
+    )
     return f"""
     <section class="race-hero card" aria-label="Live Email Game race visualization">
       <div class="race-hero__canvas-wrap">
-        <div class="race-hero__canvas" id="race-canvas" aria-hidden="true"></div>
+        <div class="race-hero__canvas" id="race-canvas" aria-hidden="true">
+          <div class="race-arena">
+            <div class="race-arena__grid"></div>
+            <div class="race-arena__track"></div>
+            <div class="race-arena__inner"></div>
+            <div class="race-arena__pods">
+              {''.join(pod_rows)}
+            </div>
+          </div>
+        </div>
         <div class="race-hero__overlay">
           <div class="race-hero__title">
             <span class="race-hero__kicker">Email Race Control</span>
             <h1>Live Email Pod Race</h1>
+          </div>
+          <div class="race-state-banner">
+            <span>Race State</span>
+            <strong>{html_escape(str(story.get('headline') or 'Race live').upper(), quote=False)} - {html_escape(target_name, quote=False)}</strong>
+            <em>{html_escape(banner_action, quote=False)}</em>
           </div>
           <div class="race-story">
             <div class="race-story__headline">{html_escape(str(story.get('headline') or 'Race live'), quote=False)}</div>
@@ -483,15 +520,19 @@ def _dashboard_script(race: Dict[str, Any]) -> str:
 
       const renderFallback = () => {{
         if (!canvasHost) return;
+        canvasHost.classList.add('is-fallback');
+        if (canvasHost.querySelector('.race-arena')) return;
         canvasHost.innerHTML = `
-          <div class="race-fallback">
-            <div class="race-fallback__ring"></div>
-            <div class="race-fallback__pods">
-              <div class="pod pod--user">YOU</div>
-              <div class="pod">#2</div>
-              <div class="pod">#3</div>
-              <div class="pod">#4</div>
-              <div class="pod">#5</div>
+          <div class="race-arena">
+            <div class="race-arena__grid"></div>
+            <div class="race-arena__track"></div>
+            <div class="race-arena__inner"></div>
+            <div class="race-arena__pods">
+              <div class="track-pod is-user" style="--pod-index:0;"><span class="track-pod__badge">#4</span><span class="track-pod__body"></span><span class="track-pod__label">YOU</span><span class="track-pod__score">live</span></div>
+              <div class="track-pod is-bot" style="--pod-index:1;"><span class="track-pod__badge">#3</span><span class="track-pod__body"></span><span class="track-pod__label">bot_2</span><span class="track-pod__score">target</span></div>
+              <div class="track-pod" style="--pod-index:2;"><span class="track-pod__badge">#2</span><span class="track-pod__body"></span><span class="track-pod__label">rival</span><span class="track-pod__score">ahead</span></div>
+              <div class="track-pod is-bot" style="--pod-index:3;"><span class="track-pod__badge">#5</span><span class="track-pod__body"></span><span class="track-pod__label">bot_1</span><span class="track-pod__score">behind</span></div>
+              <div class="track-pod" style="--pod-index:4;"><span class="track-pod__badge">#1</span><span class="track-pod__body"></span><span class="track-pod__label">leader</span><span class="track-pod__score">lead</span></div>
             </div>
           </div>`;
       }};
@@ -707,12 +748,12 @@ def _dashboard_script(race: Dict[str, Any]) -> str:
           const elapsed = clock.getElapsedTime();
           const delta = clock.getDelta();
           const isIdle = String(state.phase || '').toLowerCase() === 'between matches' || String(state.phase || '').toLowerCase() === 'waiting';
-          anchor += delta * (isIdle ? 0.08 : 0.18);
+          anchor += delta * (isIdle ? 0.18 : 0.36);
           const drift = Math.sin(elapsed * 0.45) * 0.04;
           const bob = Math.sin(elapsed * 1.2) * (isIdle ? 0.16 : 0.08);
 
           racerMeshes.forEach((mesh, index) => {{
-            mesh.userData.angle += delta * (isIdle ? 0.08 : 0.18) + drift * 0.01;
+            mesh.userData.angle += delta * (isIdle ? 0.18 : 0.36) + drift * 0.01;
             mesh.userData.radius += (mesh.userData.targetRadius - mesh.userData.radius) * Math.min(1, delta * 2.2);
             const surgeBoost = mesh.userData.item && mesh.userData.item.is_user ? mesh.userData.surge : 0;
             const angle = mesh.userData.angle + index * 0.08 + surgeBoost * 0.2;
@@ -906,7 +947,12 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     latest_match = summary["latest_match"]
     top5 = leaderboard.get("top5") or []
     chart_points = leaderboard.get("chart", {}).get("points") or []
-    chart_html = _sparkline_svg([int(value) for value in chart_points if isinstance(value, int) or isinstance(value, float)])
+    chart_values = [int(value) for value in chart_points if isinstance(value, int) or isinstance(value, float)]
+    chart_html = (
+        _sparkline_svg(chart_values)
+        if len(chart_values) >= 2 and len(set(chart_values)) > 1
+        else "<div class='chart-empty'>Waiting for enough score movement to draw a useful trend.</div>"
+    )
     last_status = status.get("phase", "waiting")
     race_hero_html = _race_hero_html(race)
     race_script_html = _dashboard_script(race)
@@ -1007,6 +1053,127 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       height: 100%;
       min-height: clamp(460px, 62vh, 720px);
     }}
+    .race-arena {{
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 50% 42%, rgba(125,255,178,0.12), transparent 24%),
+        radial-gradient(circle at 50% 55%, rgba(102,217,255,0.1), transparent 42%);
+    }}
+    .race-arena__grid {{
+      position: absolute;
+      inset: -30% -10% -10%;
+      background:
+        linear-gradient(rgba(102,217,255,0.11) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(102,217,255,0.11) 1px, transparent 1px);
+      background-size: 36px 36px;
+      transform: perspective(520px) rotateX(63deg) translateY(70px);
+      transform-origin: 50% 80%;
+      animation: gridDrift 7s linear infinite;
+      opacity: 0.7;
+    }}
+    .race-arena__track {{
+      position: absolute;
+      left: 50%;
+      top: 49%;
+      width: min(84vw, 700px);
+      height: min(46vw, 340px);
+      min-height: 210px;
+      transform: translate(-50%, -50%);
+      border: 2px solid rgba(102,217,255,0.58);
+      border-radius: 50%;
+      box-shadow:
+        0 0 0 18px rgba(102,217,255,0.06),
+        inset 0 0 0 18px rgba(125,255,178,0.04),
+        0 0 80px rgba(102,217,255,0.22);
+    }}
+    .race-arena__inner {{
+      position: absolute;
+      left: 50%;
+      top: 49%;
+      width: min(52vw, 430px);
+      height: min(28vw, 210px);
+      min-height: 120px;
+      transform: translate(-50%, -50%);
+      border: 1px solid rgba(125,255,178,0.24);
+      border-radius: 50%;
+      box-shadow: inset 0 0 36px rgba(125,255,178,0.08);
+    }}
+    .race-arena__pods {{
+      position: absolute;
+      left: 50%;
+      top: 49%;
+      width: min(84vw, 700px);
+      height: min(46vw, 340px);
+      min-height: 210px;
+      transform: translate(-50%, -50%);
+    }}
+    .track-pod {{
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 92px;
+      min-height: 58px;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 2px 6px;
+      align-items: center;
+      padding: 7px 8px;
+      border: 1px solid rgba(102,217,255,0.28);
+      border-radius: 8px;
+      background: rgba(6,14,25,0.76);
+      box-shadow: 0 0 20px rgba(102,217,255,0.14);
+      animation: podOrbit 15s linear infinite, podHover 1.9s ease-in-out infinite;
+      animation-delay: calc(var(--pod-index) * -2.8s), calc(var(--pod-index) * -0.25s);
+      transform-origin: center;
+    }}
+    .track-pod.is-user {{
+      width: 110px;
+      border-color: rgba(125,255,178,0.86);
+      background: rgba(9, 38, 31, 0.86);
+      box-shadow: 0 0 0 2px rgba(125,255,178,0.22), 0 0 44px rgba(125,255,178,0.55);
+      z-index: 3;
+      animation-duration: 12s, 1.35s;
+    }}
+    .track-pod.is-bot {{
+      border-color: rgba(102,217,255,0.44);
+    }}
+    .track-pod__body {{
+      width: 28px;
+      height: 18px;
+      grid-row: 1 / 3;
+      border-radius: 4px;
+      background:
+        linear-gradient(135deg, transparent 46%, rgba(255,255,255,0.55) 47% 52%, transparent 53%),
+        linear-gradient(135deg, var(--accent), #1d4d73);
+      box-shadow: 0 0 18px rgba(102,217,255,0.42);
+    }}
+    .track-pod.is-user .track-pod__body {{
+      background:
+        linear-gradient(135deg, transparent 46%, rgba(7,18,31,0.72) 47% 52%, transparent 53%),
+        linear-gradient(135deg, var(--accent-2), var(--accent));
+      box-shadow: 0 0 26px rgba(125,255,178,0.72);
+    }}
+    .track-pod__badge {{
+      color: var(--warning);
+      font-size: 11px;
+      font-weight: 900;
+    }}
+    .track-pod__label {{
+      color: var(--text);
+      font-size: 11px;
+      font-weight: 900;
+      line-height: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .track-pod__score {{
+      color: rgba(237,244,255,0.7);
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+    }}
     .race-hero__overlay {{
       position: relative;
       z-index: 2;
@@ -1059,6 +1226,33 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     .race-story__grid span:first-child {{
       color: var(--text);
       font-weight: 900;
+    }}
+    .race-state-banner {{
+      display: grid;
+      gap: 3px;
+      width: min(100%, 620px);
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,209,102,0.3);
+      background: rgba(255,209,102,0.08);
+      box-shadow: 0 12px 30px rgba(0,0,0,0.22);
+    }}
+    .race-state-banner span {{
+      color: var(--warning);
+      font-size: 11px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }}
+    .race-state-banner strong {{
+      color: var(--text);
+      font-size: clamp(16px, 4vw, 24px);
+      line-height: 1.05;
+    }}
+    .race-state-banner em {{
+      color: rgba(237,244,255,0.78);
+      font-size: 12px;
+      font-style: normal;
+      font-weight: 800;
     }}
     .race-badges {{
       display: flex;
@@ -1251,6 +1445,18 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       0% {{ transform: translateX(0); }}
       100% {{ transform: translateX(-42%); }}
     }}
+    @keyframes gridDrift {{
+      0% {{ background-position: 0 0, 0 0; }}
+      100% {{ background-position: 0 36px, 36px 0; }}
+    }}
+    @keyframes podOrbit {{
+      0% {{ transform: translate(-50%, -50%) rotate(calc(var(--pod-index) * 72deg)) translateX(min(39vw, 330px)) rotate(calc(var(--pod-index) * -72deg)); }}
+      100% {{ transform: translate(-50%, -50%) rotate(calc(360deg + var(--pod-index) * 72deg)) translateX(min(39vw, 330px)) rotate(calc(-360deg - var(--pod-index) * 72deg)); }}
+    }}
+    @keyframes podHover {{
+      0%, 100% {{ margin-top: -2px; filter: brightness(1); }}
+      50% {{ margin-top: 7px; filter: brightness(1.22); }}
+    }}
     .hero-main {{
       padding: 24px;
     }}
@@ -1300,6 +1506,10 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       color: var(--text);
       box-shadow: none;
       cursor: default;
+    }}
+    .hero--compact {{
+      grid-template-columns: 1fr;
+      margin-top: -6px;
     }}
     .stat-grid {{
       display: grid;
@@ -1351,6 +1561,14 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       width: 100%;
       border-collapse: collapse;
     }}
+    .table-scroll {{
+      width: 100%;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }}
+    .table-scroll table {{
+      min-width: 520px;
+    }}
     th, td {{
       padding: 10px 8px;
       text-align: left;
@@ -1381,6 +1599,17 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     .good {{ color: var(--accent-2); }}
     .warn {{ color: var(--warning); }}
     .chart svg {{ width: 100%; height: auto; display: block; }}
+    .chart-empty {{
+      min-height: 160px;
+      display: grid;
+      place-items: center;
+      padding: 18px;
+      border: 1px dashed rgba(125, 255, 178, 0.22);
+      border-radius: 8px;
+      color: var(--muted);
+      text-align: center;
+      background: rgba(255,255,255,0.03);
+    }}
     ul {{
       margin: 0;
       padding-left: 18px;
@@ -1418,6 +1647,26 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       .race-hero__canvas-wrap, .race-hero__overlay, .race-hero__canvas {{
         min-height: 64vh;
       }}
+      .race-arena__pods, .race-arena__track {{
+        width: min(118vw, 460px);
+        height: 300px;
+      }}
+      .race-arena__inner {{
+        width: min(72vw, 280px);
+        height: 170px;
+      }}
+      .track-pod {{
+        width: 78px;
+        min-height: 52px;
+        padding: 6px;
+      }}
+      .track-pod.is-user {{
+        width: 94px;
+      }}
+      @keyframes podOrbit {{
+        0% {{ transform: translate(-50%, -50%) rotate(calc(var(--pod-index) * 72deg)) translateX(190px) rotate(calc(var(--pod-index) * -72deg)); }}
+        100% {{ transform: translate(-50%, -50%) rotate(calc(360deg + var(--pod-index) * 72deg)) translateX(190px) rotate(calc(-360deg - var(--pod-index) * 72deg)); }}
+      }}
       .race-story {{
         padding: 12px;
       }}
@@ -1426,6 +1675,19 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       }}
       .race-ticker span {{
         animation-duration: 18s;
+      }}
+      .race-hero__strip {{
+        max-height: 210px;
+        overflow-y: auto;
+        overflow-x: hidden;
+      }}
+      .racers-list {{
+        display: grid;
+        min-width: 0;
+      }}
+      .racers-list__item {{
+        min-width: 0;
+        width: 100%;
       }}
     }}
     @media (prefers-reduced-motion: reduce) {{
@@ -1436,6 +1698,9 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       }}
       .race-ticker span {{
         transform: none;
+      }}
+      .track-pod {{
+        animation: none !important;
       }}
     }}
   </style>
@@ -1485,14 +1750,16 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       </div>
       <div class="card panel">
         <h2>Leaderboard Top 5</h2>
+        <div class="table-scroll">
         <table>
           <thead>
-            <tr><th>Rank</th><th>Agent</th><th>Elo</th></tr>
+            <tr><th>Rank</th><th>Agent</th><th>Score</th></tr>
           </thead>
           <tbody>
             {''.join(rows) if rows else '<tr><td colspan="3">No leaderboard snapshot yet.</td></tr>'}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
 
@@ -1503,6 +1770,7 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
         <div class="two-col" style="margin-top: 12px;">
           <div>
             <div class="label">Rounds</div>
+            <div class="table-scroll">
             <table>
               <thead>
                 <tr><th>Round</th><th>Sent</th><th>Replies</th><th>Submitted</th><th>Reminders</th></tr>
@@ -1511,6 +1779,7 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
                 {round_table if latest_match else '<tr><td colspan="5">No parsed rounds yet.</td></tr>'}
               </tbody>
             </table>
+            </div>
           </div>
           <div>
             <div class="label">Coach Weaknesses</div>
