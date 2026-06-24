@@ -65,6 +65,7 @@ MAX_COMMAND_AUDIT = 40
 HOUSE_BOT_IDS = {"house_bot_1", "house_bot_2", "house_bot_3"}
 BOT_TO_BOT_SAFE_COMMANDS = {
     "/help",
+    "/coach",
     "/status",
     "/logs",
     "/match",
@@ -784,6 +785,8 @@ class EmailGameMonitor:
         if now - self._last_heartbeat_monotonic < 60.0:
             return
         self._last_heartbeat_monotonic = now
+        self.state.phase = self._derive_phase()
+        self._persist_state()
         print(
             "[monitor] heartbeat "
             f"pid={os.getpid()} phase={self._derive_phase()} "
