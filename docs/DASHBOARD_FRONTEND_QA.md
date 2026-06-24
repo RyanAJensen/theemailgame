@@ -25,10 +25,10 @@ Watch mode reruns every 60 seconds and rewrites the report:
 Optional Telegram summary:
 
 ```bash
-./.venv/bin/python scripts/dashboard_frontend_qa.py --telegram-report
+./.venv/bin/python scripts/dashboard_frontend_qa.py --send-report
 ```
 
-The Telegram summary uses the tester bot credentials only when `EMAIL_GAME_TEST_TELEGRAM_BOT_TOKEN` and `EMAIL_GAME_TEST_REPORT_CHAT_ID` are already present.
+`--telegram-report` is kept as a backwards-compatible alias. The Telegram summary uses the tester bot credentials only when `EMAIL_GAME_TEST_TELEGRAM_BOT_TOKEN` and `EMAIL_GAME_TEST_REPORT_CHAT_ID` are already present.
 
 ## Browser Setup
 
@@ -69,6 +69,15 @@ The markdown report is written to:
 dashboard_qa/report.md
 ```
 
+Machine-readable QA state is written to:
+
+```text
+dashboard_qa/latest-summary.json
+dashboard_qa/last_report_state.json
+```
+
+`latest-summary.json` stores the current QA result. `last_report_state.json` is updated only after a tester-bot report is sent, and stores the last git commit, screenshot hashes, summary, and sent timestamp.
+
 Codex should use this report after dashboard UI changes to decide the next frontend polish task. The report scores Android readiness and checks:
 
 - console errors
@@ -92,4 +101,5 @@ Codex should use this report after dashboard UI changes to decide the next front
 - Tokens and protected URLs are redacted from reports and console output.
 - The dashboard remains read-only.
 - The QA agent does not restart the Email Game agent, monitor, or dashboard.
+- The tester-bot report sends screenshots and a dashboard button, but captions avoid printing the protected dashboard token.
 - Do not commit screenshots unless Papzin explicitly asks for them.

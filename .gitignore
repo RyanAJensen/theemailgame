@@ -12,6 +12,8 @@ venv/
 session_results/
 agent_logs/
 current_game_*.json
+dashboard_qa/*
+!dashboard_qa/.gitkeep
 
 # Private Papzin Email Game notes
 AGENT_CHANGELOG.md

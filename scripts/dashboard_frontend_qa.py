@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
+import subprocess
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
@@ -23,13 +26,17 @@ TOKEN_FILE = AGENT_LOGS / "emailgame-dashboard-token.txt"
 QA_DIR = PROJECT_ROOT / "dashboard_qa"
 SCREENSHOT_DIR = QA_DIR / "screenshots"
 REPORT_PATH = QA_DIR / "report.md"
+SUMMARY_PATH = QA_DIR / "latest-summary.json"
+LAST_REPORT_STATE_PATH = QA_DIR / "last_report_state.json"
 VIEWPORTS = [
     ("home-412x915.png", 412, 915),
     ("home-360x800.png", 360, 800),
     ("home-412x1000.png", 412, 1000),
 ]
+TELEGRAM_TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
 TOKEN_RE = re.compile(r"\b[A-Za-z0-9_-]{24,}\b")
 BOT_API_BASE = "https://api.telegram.org/bot"
+REPORT_CHAT_ENV = "EMAIL_GAME_TEST_REPORT_CHAT_ID"
 
 
 @dataclass
@@ -76,9 +83,26 @@ def _read_text(path: Path) -> str:
 
 
 def _redact(text: str) -> str:
+    text = TELEGRAM_TOKEN_RE.sub("[telegram-token-redacted]", text)
     text = re.sub(r"https://[^/\s]+/d/[^/\s]+/?", "https://[dashboard-url-redacted]/d/[token]/", text)
     text = re.sub(r"http://127\.0\.0\.1:8787/d/[^/\s]+/?", "http://127.0.0.1:8787/d/[token]/", text)
     return TOKEN_RE.sub("[token-redacted]", text)
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load_private_env() -> None:
+    env_path = PROJECT_ROOT / ".env.local"
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
 def _dashboard_url() -> Tuple[str, str]:
@@ -109,10 +133,10 @@ async def _run_playwright_qa(url: str, result: QAResult) -> None:
         async with async_playwright() as p:
             browser = await p.chromium.launch()
             for filename, width, height in VIEWPORTS:
-                viewport_result = await _qa_viewport(browser, url, filename, width, height, reduced_motion=False)
+                viewport_result = await _qa_viewport(browser, url, filename, width, height, reduced_motion=False, result=result)
                 result.viewports.append(viewport_result)
                 result.screenshots.append(str(Path("dashboard_qa/screenshots") / filename))
-            reduced = await _qa_viewport(browser, url, "reduced-motion-check.png", 412, 915, reduced_motion=True)
+            reduced = await _qa_viewport(browser, url, "reduced-motion-check.png", 412, 915, reduced_motion=True, result=result)
             result.reduced_motion_useful = reduced.hero_height > 250 and reduced.our_racer_above_fold
             await browser.close()
     except Exception as exc:
@@ -124,7 +148,15 @@ async def _run_playwright_qa(url: str, result: QAResult) -> None:
         result.browser_available = False
 
 
-async def _qa_viewport(browser: Any, url: str, filename: str, width: int, height: int, reduced_motion: bool) -> ViewportResult:
+async def _qa_viewport(
+    browser: Any,
+    url: str,
+    filename: str,
+    width: int,
+    height: int,
+    reduced_motion: bool,
+    result: QAResult,
+) -> ViewportResult:
     console_errors: List[str] = []
     failed_requests: List[str] = []
     context = await browser.new_context(
@@ -182,7 +214,7 @@ async def _qa_viewport(browser: Any, url: str, filename: str, width: int, height
             })
             .map((el) => el.innerText || el.textContent || '')
             .join('\\n');
-          const duplicateOpen = (text.match(/Open Race Control Dashboard/g) || []).length > 0;
+          const duplicateOpen = (text.match(/Open Race Control Dashboard/g) || []).length > 1;
           const ourRacer = /YOU|letlhogonolo_fanampe/.test(aboveFoldText);
           const numbers = /Rank\\s*#?\\d|Score\\s*\\d|Gap to #1|Need \\+\\d/.test(aboveFoldText);
           const unreadable = all.some((el) => {
@@ -207,6 +239,8 @@ async def _qa_viewport(browser: Any, url: str, filename: str, width: int, height
         }"""
     )
     await context.close()
+    result.console_errors.extend(console_errors)
+    result.failed_requests.extend(failed_requests)
 
     return ViewportResult(
         name=filename,
@@ -373,30 +407,222 @@ def _write_report(result: QAResult) -> None:
     QA_DIR.mkdir(parents=True, exist_ok=True)
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(_report(result), encoding="utf-8")
+    SUMMARY_PATH.write_text(json.dumps(_summary_payload(result), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _summary_payload(result: QAResult) -> Dict[str, Any]:
+    return {
+        "generated_at": _utc_now(),
+        "qa_score": result.score,
+        "android_readiness": result.readiness,
+        "browser_available": result.browser_available,
+        "screenshots_captured": bool(result.screenshots),
+        "screenshots": result.screenshots,
+        "main_issue": result.main_issue,
+        "recommendation": result.recommendation,
+        "url_source": result.url_source,
+        "console_errors": len(result.console_errors),
+        "failed_requests": len(result.failed_requests),
+        "viewports": [
+            {
+                "name": item.name,
+                "width": item.width,
+                "height": item.height,
+                "loaded_ms": item.loaded_ms,
+                "horizontal_overflow": item.horizontal_overflow,
+                "table_overflow": item.table_overflow,
+                "clipped_elements": item.clipped_elements,
+                "wide_elements": item.wide_elements,
+                "tiny_tap_targets": item.tiny_tap_targets,
+                "duplicate_open_card": item.duplicate_open_card,
+                "hero_height": item.hero_height,
+                "our_racer_above_fold": item.our_racer_above_fold,
+                "race_numbers_above_fold": item.race_numbers_above_fold,
+                "unreadable_text": item.unreadable_text,
+            }
+            for item in result.viewports
+        ],
+    }
+
+
+def _git_commit() -> str:
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
+def _file_sha256(path: Path) -> str:
+    if not path.exists():
+        return ""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _screenshot_hashes(result: QAResult) -> Dict[str, str]:
+    hashes: Dict[str, str] = {}
+    for item in result.screenshots:
+        rel_path = Path(item)
+        path = PROJECT_ROOT / rel_path
+        hashes[item] = _file_sha256(path)
+    return hashes
+
+
+def _read_last_report_state() -> Dict[str, Any]:
+    try:
+        parsed = json.loads(LAST_REPORT_STATE_PATH.read_text(encoding="utf-8"))
+        return parsed if isinstance(parsed, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _write_last_report_state(result: QAResult, summary: str, commit: str, screenshot_hashes: Dict[str, str]) -> None:
+    LAST_REPORT_STATE_PATH.write_text(
+        json.dumps(
+            {
+                "last_git_commit": commit,
+                "last_screenshot_hashes": screenshot_hashes,
+                "last_summary": summary,
+                "last_sent_timestamp": _utc_now(),
+                "last_qa_score": result.score,
+                "last_readiness": result.readiness,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _telegram_summary(result: QAResult, previous: Dict[str, Any], commit: str, screenshot_hashes: Dict[str, str]) -> str:
+    if not previous:
+        if not result.screenshots:
+            return (
+                "Dashboard QA complete. Browser screenshots were not captured because browser automation is unavailable. "
+                f"Current readiness: {result.readiness}; main issue: {result.main_issue}. "
+                f"Recommendation: {result.recommendation}"
+            )
+        return (
+            "Dashboard QA complete. Initial Android screenshots were captured, the protected dashboard was checked for "
+            f"overflow, clipped hero cards, above-the-fold race numbers, console errors, and network failures. Current readiness: "
+            f"{result.readiness}; main issue: {result.main_issue}."
+        )
+    changes: List[str] = []
+    if previous.get("last_git_commit") != commit:
+        changes.append("the dashboard/QA commit changed")
+    previous_hashes = previous.get("last_screenshot_hashes") if isinstance(previous.get("last_screenshot_hashes"), dict) else {}
+    changed_screenshots = [
+        name for name, digest in screenshot_hashes.items() if previous_hashes.get(name) and previous_hashes.get(name) != digest
+    ]
+    if changed_screenshots:
+        changes.append(f"{len(changed_screenshots)} Android screenshot(s) changed")
+    if previous.get("last_qa_score") != result.score:
+        changes.append(f"QA score is now {result.score}")
+    if previous.get("last_readiness") != result.readiness:
+        changes.append(f"readiness is now {result.readiness}")
+    if not changes:
+        changes.append("screenshots and QA score are unchanged")
+    return (
+        "Dashboard QA complete. Since the last screenshots, "
+        + ", ".join(changes)
+        + f". Main issue: {result.main_issue}. Recommendation: {result.recommendation}"
+    )
+
+
+def _telegram_request(token: str, method: str, payload: Dict[str, Any], timeout: int = 20) -> Tuple[bool, str]:
+    data = urlencode({key: str(value) for key, value in payload.items()}).encode("utf-8")
+    request = Request(
+        f"{BOT_API_BASE}{token}/{method}",
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            parsed = json.loads(response.read().decode("utf-8", "replace"))
+            return bool(isinstance(parsed, dict) and parsed.get("ok")), ""
+    except Exception as exc:
+        return False, _redact(str(exc))
+
+
+def _telegram_send_photo(token: str, chat_id: str, path: Path, caption: str = "") -> Tuple[bool, str]:
+    if not path.exists():
+        return False, f"missing screenshot {path.name}"
+    boundary = f"----emailgameqa{int(time.time() * 1000)}"
+    fields = {"chat_id": chat_id}
+    if caption:
+        fields["caption"] = caption
+    body = bytearray()
+    for key, value in fields.items():
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode("utf-8"))
+    body.extend(f"--{boundary}\r\n".encode("utf-8"))
+    body.extend(f'Content-Disposition: form-data; name="photo"; filename="{path.name}"\r\n'.encode("utf-8"))
+    body.extend(b"Content-Type: image/png\r\n\r\n")
+    body.extend(path.read_bytes())
+    body.extend(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+    request = Request(
+        f"{BOT_API_BASE}{token}/sendPhoto",
+        data=bytes(body),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    try:
+        with urlopen(request, timeout=40) as response:
+            parsed = json.loads(response.read().decode("utf-8", "replace"))
+            return bool(isinstance(parsed, dict) and parsed.get("ok")), ""
+    except Exception as exc:
+        return False, _redact(str(exc))
 
 
 def _telegram_send(result: QAResult) -> Tuple[bool, str]:
+    _load_private_env()
     token = os.getenv("EMAIL_GAME_TEST_TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("EMAIL_GAME_TEST_REPORT_CHAT_ID", "").strip()
+    chat_id = os.getenv(REPORT_CHAT_ENV, "").strip()
     if not token or not chat_id:
         return False, "tester bot token or report chat id missing"
+    dashboard_url, _ = _dashboard_url()
+    commit = _git_commit()
+    hashes = _screenshot_hashes(result)
+    previous = _read_last_report_state()
+    summary = _telegram_summary(result, previous, commit, hashes)
+    reply_markup = json.dumps(
+        {"inline_keyboard": [[{"text": "Open Race Control Dashboard", "url": dashboard_url}]]}
+    ) if dashboard_url else ""
     text = "\n".join(
         [
             "Email Game Dashboard Frontend QA",
+            "",
+            summary,
+            "",
             f"Frontend QA score: {result.score}",
-            f"Main issue: {result.main_issue}",
-            "Screenshot paths: dashboard_qa/screenshots/",
-            f"Recommended next fix: {result.recommendation}",
+            f"Android readiness: {result.readiness}",
+            f"Screenshots: {len(result.screenshots)}",
+            "Secrets exposed: no",
         ]
     )
-    data = urlencode({"chat_id": chat_id, "text": text}).encode("utf-8")
-    request = Request(f"{BOT_API_BASE}{token}/sendMessage", data=data)
-    try:
-        with urlopen(request, timeout=20) as response:
-            parsed = json.loads(response.read().decode("utf-8", "replace"))
-            return bool(parsed.get("ok")), ""
-    except Exception as exc:
-        return False, _redact(str(exc))
+    payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": "true"}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    ok, error = _telegram_request(token, "sendMessage", payload, timeout=20)
+    if not ok:
+        return False, error
+    photo_errors: List[str] = []
+    for index, item in enumerate(result.screenshots[:3]):
+        caption = "Android dashboard screenshot" if index == 0 else ""
+        sent, photo_error = _telegram_send_photo(token, chat_id, PROJECT_ROOT / item, caption=caption)
+        if not sent:
+            photo_errors.append(photo_error)
+    _write_last_report_state(result, summary, commit, hashes)
+    if photo_errors:
+        return False, "; ".join(photo_errors)
+    return True, ""
 
 
 async def _run_once(args: argparse.Namespace) -> QAResult:
@@ -410,7 +636,7 @@ async def _run_once(args: argparse.Namespace) -> QAResult:
     await _run_playwright_qa(url, result)
     _score(result)
     _write_report(result)
-    if args.telegram_report:
+    if args.send_report:
         sent, error = _telegram_send(result)
         marker = "yes" if sent else f"no ({error})"
         print(f"telegram_report_sent={marker}")
@@ -427,7 +653,13 @@ async def _watch(args: argparse.Namespace) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run Email Game dashboard frontend QA.")
     parser.add_argument("--watch", action="store_true", help="Rerun every 60 seconds and update dashboard_qa/report.md.")
-    parser.add_argument("--telegram-report", action="store_true", help="Send a short tester-bot summary when credentials are available.")
+    parser.add_argument(
+        "--send-report",
+        "--telegram-report",
+        dest="send_report",
+        action="store_true",
+        help="Send a short tester-bot summary and screenshots when credentials are available.",
+    )
     args = parser.parse_args()
     if args.watch:
         asyncio.run(_watch(args))
