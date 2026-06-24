@@ -28,6 +28,7 @@ SCREENSHOT_DIR = QA_DIR / "screenshots"
 REPORT_PATH = QA_DIR / "report.md"
 SUMMARY_PATH = QA_DIR / "latest-summary.json"
 LAST_REPORT_STATE_PATH = QA_DIR / "last_report_state.json"
+LAST_SEND_RESULT_PATH = QA_DIR / "last_send_result.json"
 VIEWPORTS = [
     ("home-412x915.png", 412, 915),
     ("home-360x800.png", 360, 800),
@@ -78,6 +79,7 @@ class QAResult:
     browser_available: bool = False
     dependency_error: str = ""
     screenshots: List[str] = field(default_factory=list)
+    delivery_screenshots: List[str] = field(default_factory=list)
     console_errors: List[str] = field(default_factory=list)
     failed_requests: List[str] = field(default_factory=list)
     viewports: List[ViewportResult] = field(default_factory=list)
@@ -100,6 +102,16 @@ def _redact(text: str) -> str:
     text = re.sub(r"https://[^/\s]+/d/[^/\s]+/?", "https://[dashboard-url-redacted]/d/[token]/", text)
     text = re.sub(r"http://127\.0\.0\.1:8787/d/[^/\s]+/?", "http://127.0.0.1:8787/d/[token]/", text)
     return TOKEN_RE.sub("[token-redacted]", text)
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact(value)
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _redact_value(item) for key, item in value.items()}
+    return value
 
 
 def _utc_now() -> str:
@@ -128,7 +140,7 @@ def _dashboard_url() -> Tuple[str, str]:
     return "", "missing"
 
 
-async def _run_playwright_qa(url: str, result: QAResult) -> None:
+async def _run_playwright_qa(url: str, result: QAResult, force: bool = False) -> None:
     try:
         from playwright.async_api import async_playwright
     except Exception as exc:
@@ -149,6 +161,7 @@ async def _run_playwright_qa(url: str, result: QAResult) -> None:
                 viewport_result = await _qa_viewport(browser, url, filename, width, height, reduced_motion=False, result=result)
                 result.viewports.append(viewport_result)
                 result.screenshots.append(str(Path("dashboard_qa/screenshots") / filename))
+            result.delivery_screenshots = await _capture_delivery_screenshots(browser, url, force)
             reduced = await _qa_viewport(browser, url, "reduced-motion-check.png", 412, 915, reduced_motion=True, result=result)
             result.reduced_motion_useful = reduced.hero_height > 250 and reduced.our_racer_above_fold
             await browser.close()
@@ -159,6 +172,44 @@ async def _run_playwright_qa(url: str, result: QAResult) -> None:
         )
         result.dependency_error += f"\nRuntime error: {_redact(str(exc))}"
         result.browser_available = False
+
+
+async def _capture_delivery_screenshots(browser: Any, url: str, force: bool) -> List[str]:
+    filenames = [
+        "delivery-default.png",
+        "delivery-you-focused.png",
+        "delivery-you-dragged.png",
+        "delivery-rival-gap-line.png",
+    ]
+    paths = [SCREENSHOT_DIR / name for name in filenames]
+    if not force and all(path.exists() for path in paths):
+        return [str(Path("dashboard_qa/screenshots") / name) for name in filenames]
+
+    context = await browser.new_context(
+        viewport={"width": 412, "height": 915},
+        device_scale_factor=2,
+        is_mobile=True,
+        has_touch=True,
+        reduced_motion="no-preference",
+    )
+    page = await context.new_page()
+    try:
+        await page.goto(url, wait_until="networkidle", timeout=30000)
+        await page.wait_for_timeout(1200)
+        await page.screenshot(path=str(paths[0]), full_page=False)
+        await _apply_delivery_gesture(page, "you-focus")
+        await page.screenshot(path=str(paths[1]), full_page=False)
+        await page.goto(url, wait_until="networkidle", timeout=30000)
+        await page.wait_for_timeout(1200)
+        await _apply_delivery_gesture(page, "you-drag")
+        await page.screenshot(path=str(paths[2]), full_page=False)
+        await page.goto(url, wait_until="networkidle", timeout=30000)
+        await page.wait_for_timeout(1200)
+        await _apply_delivery_gesture(page, "rival-gap")
+        await page.screenshot(path=str(paths[3]), full_page=False)
+    finally:
+        await context.close()
+    return [str(Path("dashboard_qa/screenshots") / name) for name in filenames]
 
 
 async def _qa_viewport(
@@ -415,6 +466,58 @@ async def _interaction_metrics(page: Any) -> Dict[str, Any]:
             overflowAfterInteractions: document.documentElement.scrollWidth > window.innerWidth + 2,
           };
         }"""
+    )
+
+
+async def _apply_delivery_gesture(page: Any, gesture: str) -> None:
+    await page.evaluate(
+        """async (gesture) => {
+          const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+          const arena = document.querySelector('.race-arena');
+          const you = document.querySelector('.track-pod.is-user[data-racer-id]');
+          const rival = document.querySelector('.track-pod:not(.is-user)[data-racer-id]');
+          if (!arena || !you || !rival || typeof PointerEvent === 'undefined') return;
+          const center = (el) => {
+            const rect = el.getBoundingClientRect();
+            return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+          };
+          const fire = (target, type, point) => {
+            target.dispatchEvent(new PointerEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              clientX: point.x,
+              clientY: point.y,
+              pointerId: 41,
+              pointerType: 'touch',
+              isPrimary: true,
+            }));
+          };
+          const tap = async (target) => {
+            const point = center(target);
+            fire(target, 'pointerdown', point);
+            await wait(40);
+            fire(target, 'pointerup', point);
+            await wait(160);
+          };
+          const drag = async (target) => {
+            const start = center(target);
+            const end = {x: start.x + 104, y: start.y - 38};
+            fire(target, 'pointerdown', start);
+            await wait(40);
+            fire(target, 'pointermove', end);
+            await wait(80);
+            fire(target, 'pointerup', end);
+            await wait(180);
+          };
+          if (gesture === 'you-focus') {
+            await tap(you);
+          } else if (gesture === 'you-drag') {
+            await drag(you);
+          } else if (gesture === 'rival-gap') {
+            await tap(rival);
+          }
+        }""",
+        gesture,
     )
 
 
@@ -735,6 +838,32 @@ def _write_last_report_state(result: QAResult, summary: str, commit: str, screen
     )
 
 
+def _write_last_send_result(result: Dict[str, Any]) -> None:
+    QA_DIR.mkdir(parents=True, exist_ok=True)
+    LAST_SEND_RESULT_PATH.write_text(
+        json.dumps(_redact_value(result), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _read_last_send_result() -> Dict[str, Any]:
+    try:
+        parsed = json.loads(LAST_SEND_RESULT_PATH.read_text(encoding="utf-8"))
+        return parsed if isinstance(parsed, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _send_result_lines(result: Dict[str, Any]) -> List[str]:
+    return [
+        f"summary sent: {'yes' if result.get('summary_sent') else 'no'}",
+        f"screenshots found: {int(result.get('screenshots_found') or 0)}",
+        f"screenshots sent: {int(result.get('screenshots_sent') or 0)}",
+        f"fallback documents sent: {int(result.get('fallback_documents_sent') or 0)}",
+        f"telegram message ids received: {'yes' if result.get('telegram_message_ids_received') else 'no'}",
+    ]
+
+
 def _telegram_summary(result: QAResult, previous: Dict[str, Any], commit: str, screenshot_hashes: Dict[str, str]) -> str:
     main_issue = result.main_issue.rstrip(".")
     recommendation = result.recommendation.rstrip(".")
@@ -772,7 +901,7 @@ def _telegram_summary(result: QAResult, previous: Dict[str, Any], commit: str, s
     )
 
 
-def _telegram_request(token: str, method: str, payload: Dict[str, Any], timeout: int = 20) -> Tuple[bool, str]:
+def _telegram_request(token: str, method: str, payload: Dict[str, Any], timeout: int = 20) -> Tuple[bool, Dict[str, Any], str]:
     data = urlencode({key: str(value) for key, value in payload.items()}).encode("utf-8")
     request = Request(
         f"{BOT_API_BASE}{token}/{method}",
@@ -782,14 +911,14 @@ def _telegram_request(token: str, method: str, payload: Dict[str, Any], timeout:
     try:
         with urlopen(request, timeout=timeout) as response:
             parsed = json.loads(response.read().decode("utf-8", "replace"))
-            return bool(isinstance(parsed, dict) and parsed.get("ok")), ""
+            return bool(isinstance(parsed, dict) and parsed.get("ok")), parsed if isinstance(parsed, dict) else {}, ""
     except Exception as exc:
-        return False, _redact(str(exc))
+        return False, {}, _redact(str(exc))
 
 
-def _telegram_send_photo(token: str, chat_id: str, path: Path, caption: str = "") -> Tuple[bool, str]:
+def _telegram_send_photo(token: str, chat_id: str, path: Path, caption: str = "") -> Tuple[bool, Dict[str, Any], str]:
     if not path.exists():
-        return False, f"missing screenshot {path.name}"
+        return False, {}, f"missing screenshot {path.name}"
     boundary = f"----emailgameqa{int(time.time() * 1000)}"
     fields = {"chat_id": chat_id}
     if caption:
@@ -811,18 +940,77 @@ def _telegram_send_photo(token: str, chat_id: str, path: Path, caption: str = ""
     try:
         with urlopen(request, timeout=40) as response:
             parsed = json.loads(response.read().decode("utf-8", "replace"))
-            return bool(isinstance(parsed, dict) and parsed.get("ok")), ""
+            return bool(isinstance(parsed, dict) and parsed.get("ok")), parsed if isinstance(parsed, dict) else {}, ""
     except Exception as exc:
-        return False, _redact(str(exc))
+        return False, {}, _redact(str(exc))
 
 
-def _telegram_send(result: QAResult) -> Tuple[bool, str]:
+def _telegram_send_document(token: str, chat_id: str, path: Path, caption: str = "") -> Tuple[bool, Dict[str, Any], str]:
+    if not path.exists():
+        return False, {}, f"missing screenshot {path.name}"
+    boundary = f"----emailgameqa{int(time.time() * 1000)}"
+    fields = {"chat_id": chat_id}
+    if caption:
+        fields["caption"] = caption
+    body = bytearray()
+    for key, value in fields.items():
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode("utf-8"))
+    body.extend(f"--{boundary}\r\n".encode("utf-8"))
+    body.extend(f'Content-Disposition: form-data; name="document"; filename="{path.name}"\r\n'.encode("utf-8"))
+    body.extend(b"Content-Type: application/octet-stream\r\n\r\n")
+    body.extend(path.read_bytes())
+    body.extend(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+    request = Request(
+        f"{BOT_API_BASE}{token}/sendDocument",
+        data=bytes(body),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    try:
+        with urlopen(request, timeout=40) as response:
+            parsed = json.loads(response.read().decode("utf-8", "replace"))
+            return bool(isinstance(parsed, dict) and parsed.get("ok")), parsed if isinstance(parsed, dict) else {}, ""
+    except Exception as exc:
+        return False, {}, _redact(str(exc))
+
+
+def _resolve_delivery_screenshots(result: QAResult) -> List[str]:
+    if result.delivery_screenshots:
+        return result.delivery_screenshots[:3]
+    delivery_files = sorted(SCREENSHOT_DIR.glob("delivery-*.png"))
+    if delivery_files:
+        return [str(path.relative_to(PROJECT_ROOT)) for path in delivery_files[:3]]
+    if result.screenshots:
+        return result.screenshots[:3]
+    return []
+
+
+def _telegram_send(result: QAResult) -> Tuple[bool, str, Dict[str, Any]]:
     _load_private_env()
     token = os.getenv("EMAIL_GAME_TEST_TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv(REPORT_CHAT_ENV, "").strip()
+    screenshot_paths = _resolve_delivery_screenshots(result)
+    delivery_result: Dict[str, Any] = {
+        "generated_at": _utc_now(),
+        "summary_sent": False,
+        "screenshots_found": len(screenshot_paths),
+        "screenshots_sent": 0,
+        "fallback_documents_sent": 0,
+        "telegram_message_ids_received": False,
+        "message_responses": [],
+        "errors": [],
+        "dashboard_button_included": False,
+        "screenshots": screenshot_paths,
+    }
     if not token or not chat_id:
-        return False, "tester bot token or report chat id missing"
+        delivery_result["error"] = "tester bot token or report chat id missing"
+        _write_last_send_result(delivery_result)
+        return False, "tester bot token or report chat id missing", delivery_result
     dashboard_url, _ = _dashboard_url()
+    if not dashboard_url:
+        delivery_result["error"] = "dashboard url missing"
+        _write_last_send_result(delivery_result)
+        return False, "dashboard url missing", delivery_result
     commit = _git_commit()
     hashes = _screenshot_hashes(result)
     previous = _read_last_report_state()
@@ -838,43 +1026,90 @@ def _telegram_send(result: QAResult) -> Tuple[bool, str]:
             "",
             f"Frontend QA score: {result.score}",
             f"Android readiness: {result.readiness}",
-            f"Screenshots: {len(result.screenshots)}",
+            f"Screenshots: {len(screenshot_paths)}",
             "Secrets exposed: no",
         ]
     )
     payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": "true"}
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    ok, error = _telegram_request(token, "sendMessage", payload, timeout=20)
-    if not ok:
-        return False, error
-    photo_errors: List[str] = []
-    for index, item in enumerate(result.screenshots[:3]):
-        caption = "Android dashboard screenshot" if index == 0 else ""
-        sent, photo_error = _telegram_send_photo(token, chat_id, PROJECT_ROOT / item, caption=caption)
+    ok, message_response, error = _telegram_request(token, "sendMessage", payload, timeout=20)
+    delivery_result["summary_sent"] = bool(ok)
+    delivery_result["telegram_message_ids_received"] = bool(
+        ok and isinstance(message_response.get("result"), dict) and message_response["result"].get("message_id") is not None
+    )
+    delivery_result["dashboard_button_included"] = bool(reply_markup)
+    if ok:
+        delivery_result["message_responses"].append(
+            {
+                "method": "sendMessage",
+                "ok": True,
+                "response": _redact_value(message_response),
+                "message_id": message_response.get("result", {}).get("message_id") if isinstance(message_response.get("result"), dict) else None,
+            }
+        )
+    else:
+        delivery_result["message_responses"].append({"method": "sendMessage", "ok": False, "error": error})
+        delivery_result["errors"].append(error)
+        _write_last_send_result(delivery_result)
+        return False, error, delivery_result
+
+    screenshot_labels = [
+        "Default race hero",
+        "YOU pod focused",
+        "YOU pod dragged",
+        "Rival selected with gap line",
+    ]
+    for index, item in enumerate(screenshot_paths[:3]):
+        caption = screenshot_labels[index] if index < len(screenshot_labels) else "Android dashboard screenshot"
+        sent, screenshot_response, screenshot_error = _telegram_send_photo(token, chat_id, PROJECT_ROOT / item, caption=caption)
+        fallback_used = False
         if not sent:
-            photo_errors.append(photo_error)
+            sent, screenshot_response, screenshot_error = _telegram_send_document(token, chat_id, PROJECT_ROOT / item, caption=caption)
+            fallback_used = sent
+        delivery_result["message_responses"].append(
+            {
+                "method": "sendDocument" if fallback_used else "sendPhoto",
+                "ok": bool(sent),
+                "response": _redact_value(screenshot_response),
+                "file": Path(item).name,
+                "fallback_document": bool(fallback_used),
+                "message_id": screenshot_response.get("result", {}).get("message_id") if isinstance(screenshot_response.get("result"), dict) else None,
+            }
+        )
+        if sent:
+            delivery_result["screenshots_sent"] += 1
+            if fallback_used:
+                delivery_result["fallback_documents_sent"] += 1
+        else:
+            delivery_result["errors"].append(screenshot_error)
+
     _write_last_report_state(result, summary, commit, hashes)
-    if photo_errors:
-        return False, "; ".join(photo_errors)
-    return True, ""
+    _write_last_send_result(delivery_result)
+    if delivery_result["errors"]:
+        return False, "; ".join(delivery_result["errors"]), delivery_result
+    return True, "", delivery_result
 
 
 async def _run_once(args: argparse.Namespace) -> QAResult:
     url, source = _dashboard_url()
     result = QAResult(url_source=source)
+    if args.force:
+        for path in SCREENSHOT_DIR.glob("*.png"):
+            path.unlink(missing_ok=True)
     if not url:
         result.dependency_error = "Dashboard URL and token are missing; cannot open protected dashboard."
         result.score = 0
         _write_report(result)
         return result
-    await _run_playwright_qa(url, result)
+    await _run_playwright_qa(url, result, force=bool(args.force))
     _score(result)
     _write_report(result)
     if args.send_report:
-        sent, error = _telegram_send(result)
-        marker = "yes" if sent else f"no ({error})"
-        print(f"telegram_report_sent={marker}")
+        sent, error, delivery_result = _telegram_send(result)
+        report_result = _read_last_send_result() or delivery_result
+        for line in _send_result_lines(report_result):
+            print(line)
     return result
 
 
@@ -888,6 +1123,7 @@ async def _watch(args: argparse.Namespace) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run Email Game dashboard frontend QA.")
     parser.add_argument("--watch", action="store_true", help="Rerun every 60 seconds and update dashboard_qa/report.md.")
+    parser.add_argument("--force", action="store_true", help="Remove existing screenshots before rerunning QA.")
     parser.add_argument(
         "--send-report",
         "--telegram-report",
@@ -900,6 +1136,8 @@ def main() -> int:
         asyncio.run(_watch(args))
         return 0
     result = asyncio.run(_run_once(args))
+    if args.send_report:
+        return 0 if result.browser_available or result.dependency_error else 1
     print(f"qa_score={result.score}")
     print(f"android_readiness={result.readiness}")
     print(f"browser_available={'yes' if result.browser_available else 'no'}")

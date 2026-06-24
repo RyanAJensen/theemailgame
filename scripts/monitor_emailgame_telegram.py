@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import subprocess
 import threading
 import time
@@ -69,6 +70,7 @@ BOT_TO_BOT_SAFE_COMMANDS = {
     "/dashboard",
     "/dashboard_url",
     "/dashboard_refresh",
+    "/dashboard_qa_report",
     "/status",
     "/logs",
     "/match",
@@ -1358,6 +1360,8 @@ class EmailGameMonitor:
                 dashboard_url, refreshed = self._dashboard_tunnel_url(force_refresh=True)
                 response = self._dashboard_text(url=dashboard_url, refreshed=refreshed)
                 reply_markup = self._dashboard_reply_markup(url=dashboard_url)
+            elif command == "/dashboard_qa_report":
+                response = self._dashboard_qa_report_text()
             elif command == "/dashboard_url":
                 response = self._dashboard_url_text()
             else:
@@ -1407,6 +1411,8 @@ class EmailGameMonitor:
         if command == "/dashboard_refresh":
             dashboard_url, refreshed = self._dashboard_tunnel_url(force_refresh=True)
             return self._dashboard_text(url=dashboard_url, refreshed=refreshed)
+        if command == "/dashboard_qa_report":
+            return self._dashboard_qa_report_text()
         if command == "/status":
             return self._status_text()
         if command == "/logs":
@@ -1457,6 +1463,7 @@ class EmailGameMonitor:
             "<b>Agent</b>\n"
             "/dashboard — open the race control dashboard\n"
             "/dashboard_refresh — refresh the dashboard tunnel\n"
+            "/dashboard_qa_report — resend the latest QA screenshots\n"
             "/status — current state\n"
             "/startagent — start if idle\n"
             "/restartagent — safe restart\n"
@@ -1588,6 +1595,27 @@ class EmailGameMonitor:
         return (
             "🏁 <b>Email Game Race Control</b>\n\n"
             f"Open dashboard:\n<code>{html_escape(url, quote=False)}</code>"
+        )
+
+    def _dashboard_qa_report_text(self) -> str:
+        command = [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "dashboard_frontend_qa.py"),
+            "--send-report",
+            "--force",
+        ]
+        completed = _run_command(command, timeout=300)
+        stdout = _clean_log_text(completed.stdout)
+        stderr = _clean_log_text(completed.stderr)
+        if completed.returncode != 0:
+            detail = stderr or stdout or f"exit {completed.returncode}"
+            return (
+                "Dashboard QA report resend failed.\n\n"
+                f"<pre>{html_escape(detail, quote=False)}</pre>"
+            )
+        return (
+            "Dashboard QA report resent.\n\n"
+            f"<pre>{html_escape(stdout or 'No output.', quote=False)}</pre>"
         )
 
     def _dashboard_text(self, url: str = "", refreshed: bool = False) -> str:
