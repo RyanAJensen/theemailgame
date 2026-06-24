@@ -201,6 +201,8 @@ def _build_race_state(summary: Dict[str, Any]) -> Dict[str, Any]:
         metrics.get("score_delta_60m"),
     )
 
+    race_story = _race_story(racers, user_racer, leaderboard, status, score_delta, summary)
+
     return {
         "phase": str(status.get("phase") or "waiting"),
         "log_stale": bool(status.get("log_stale")),
@@ -208,6 +210,7 @@ def _build_race_state(summary: Dict[str, Any]) -> Dict[str, Any]:
         "score": leaderboard.get("score"),
         "gap_to_one": leaderboard.get("gap_to_one"),
         "gap_to_four": leaderboard.get("gap_to_four"),
+        "story": race_story,
         "score_delta": score_delta,
         "rank_change": summary.get("coach", {}).get("rank_delta") if isinstance(summary.get("coach"), dict) else None,
         "top_competitors": racers,
@@ -215,6 +218,126 @@ def _build_race_state(summary: Dict[str, Any]) -> Dict[str, Any]:
         "leader_score": leader_score,
         "callout": _callout_text(score_delta, summary),
         "public_url": _load_public_url(),
+    }
+
+
+def _race_story(
+    racers: List[Dict[str, Any]],
+    user_racer: Dict[str, Any],
+    leaderboard: Dict[str, Any],
+    status: Dict[str, Any],
+    score_delta: Any,
+    summary: Dict[str, Any],
+) -> Dict[str, Any]:
+    user_rank = _safe_int(_first_non_none(user_racer.get("rank"), leaderboard.get("rank")))
+    user_score = _safe_int(_first_non_none(user_racer.get("score"), leaderboard.get("score")))
+    ranked = sorted(
+        [item for item in racers if isinstance(item.get("rank"), int)],
+        key=lambda item: int(item["rank"]),
+    )
+    above = [item for item in ranked if user_rank is not None and int(item["rank"]) < user_rank]
+    below = [item for item in ranked if user_rank is not None and int(item["rank"]) > user_rank]
+    immediate_above = max(above, key=lambda item: int(item["rank"]), default=None)
+    immediate_below = min(below, key=lambda item: int(item["rank"]), default=None)
+    tied_above = next(
+        (
+            item
+            for item in sorted(above, key=lambda item: int(item["rank"]), reverse=True)
+            if user_score is not None and _safe_int(item.get("score")) == user_score
+        ),
+        None,
+    )
+    next_distinct_above = next(
+        (
+            item
+            for item in sorted(above, key=lambda item: int(item["rank"]), reverse=True)
+            if user_score is not None and _safe_int(item.get("score")) is not None and int(item["score"]) > user_score
+        ),
+        None,
+    )
+    next_target = tied_above or immediate_above
+
+    def _points_to_clear(item: Optional[Dict[str, Any]]) -> Optional[int]:
+        target_score = _safe_int(item.get("score")) if isinstance(item, dict) else None
+        if target_score is None or user_score is None:
+            return None
+        return max(1, target_score - user_score + 1)
+
+    def _score_gap(item: Optional[Dict[str, Any]]) -> Optional[int]:
+        target_score = _safe_int(item.get("score")) if isinstance(item, dict) else None
+        if target_score is None or user_score is None:
+            return None
+        return max(0, target_score - user_score)
+
+    buffer_over_below = None
+    if immediate_below is not None and user_score is not None and _safe_int(immediate_below.get("score")) is not None:
+        buffer_over_below = max(0, user_score - int(immediate_below["score"]))
+
+    gap_to_one = _safe_int(leaderboard.get("gap_to_one"))
+    rank_text = f"Rank #{user_rank}" if user_rank is not None else "Rank n/a"
+    score_text = str(user_score) if user_score is not None else "n/a"
+    target_rank = next_target.get("rank") if isinstance(next_target, dict) else None
+    target_name = str(next_target.get("agent_id") or "") if isinstance(next_target, dict) else ""
+    need_to_clear = _points_to_clear(next_target)
+    gap_to_next_distinct = _score_gap(next_distinct_above)
+    next_distinct_rank = next_distinct_above.get("rank") if isinstance(next_distinct_above, dict) else None
+    below_rank = immediate_below.get("rank") if isinstance(immediate_below, dict) else None
+
+    chips = [
+        f"+{score_delta} surge" if isinstance(score_delta, int) and score_delta > 0 else None,
+        "Rank up" if isinstance(summary.get("coach"), dict) and isinstance(summary["coach"].get("rank_delta"), int) and summary["coach"]["rank_delta"] < 0 else None,
+        f"Tied with #{target_rank}" if tied_above is not None else None,
+        f"Need +{need_to_clear}" if need_to_clear is not None else None,
+        "Between matches" if str(status.get("phase") or "").lower() in {"waiting", "between matches"} else None,
+        "Waiting for next match" if str(status.get("phase") or "").lower() in {"waiting", "between matches"} else None,
+    ]
+    compact_chips = [chip for chip in chips if chip][:5]
+
+    if tied_above is not None and target_rank is not None:
+        headline = f"Tied with #{target_rank} at {score_text}"
+    elif target_rank is not None:
+        headline = f"Chasing #{target_rank}"
+    else:
+        headline = "Holding race line"
+
+    next_gap_text = (
+        f"Gap to #{next_distinct_rank}: {gap_to_next_distinct}"
+        if next_distinct_rank is not None and gap_to_next_distinct is not None
+        else f"Need +{need_to_clear} to clear #{target_rank}"
+        if target_rank is not None and need_to_clear is not None
+        else "Next target: n/a"
+    )
+    buffer_text = (
+        f"Buffer over #{below_rank}: {buffer_over_below}"
+        if below_rank is not None and buffer_over_below is not None
+        else "Buffer over next rank: n/a"
+    )
+    need_text = (
+        f"Need +{need_to_clear} to clear #{target_rank}"
+        if target_rank is not None and need_to_clear is not None
+        else "Need next leaderboard tick"
+    )
+    ticker_parts = [
+        "LIVE RACE FEED",
+        f"{rank_text} at {score_text}",
+        need_text,
+        next_gap_text,
+        buffer_text,
+        "Between matches" if str(status.get("phase") or "").lower() in {"waiting", "between matches"} else str(status.get("phase") or "race live"),
+    ]
+
+    return {
+        "headline": headline,
+        "rank_text": rank_text,
+        "score_text": score_text,
+        "target_rank": target_rank,
+        "target_name": target_name,
+        "need_to_clear": need_to_clear,
+        "next_gap_text": next_gap_text,
+        "buffer_text": buffer_text,
+        "gap_to_one_text": f"Gap to #1: {gap_to_one}" if gap_to_one is not None else "Gap to #1: n/a",
+        "chips": compact_chips,
+        "ticker": " · ".join(ticker_parts),
     }
 
 
@@ -242,6 +365,7 @@ def _callout_text(score_delta: Any, summary: Dict[str, Any]) -> str:
 
 def _race_hero_html(race: Dict[str, Any]) -> str:
     top_competitors = race.get("top_competitors") if isinstance(race.get("top_competitors"), list) else []
+    story = race.get("story") if isinstance(race.get("story"), dict) else {}
     rows = []
     for item in top_competitors:
         if not isinstance(item, dict):
@@ -249,8 +373,10 @@ def _race_hero_html(race: Dict[str, Any]) -> str:
         classes = ["racers-list__item"]
         if item.get("is_user"):
             classes.append("is-user")
+        is_bot = str(item.get("agent_id") or "").startswith("house_bot")
         score = item.get("score")
         gap = item.get("gap_to_leader")
+        marker = "YOU" if item.get("is_user") else "BOT" if is_bot else "RIVAL"
         rows.append(
             "<li class='" + " ".join(classes) + "' "
             f"data-agent='{html_escape(str(item.get('agent_id') or ''), quote=True)}' "
@@ -258,6 +384,7 @@ def _race_hero_html(race: Dict[str, Any]) -> str:
             f"data-gap='{html_escape(str(gap if gap is not None else ''), quote=True)}' "
             f"data-score='{html_escape(str(score if score is not None else ''), quote=True)}'>"
             f"<span class='racers-list__rank'>#{html_escape(str(item.get('rank') or ''), quote=False)}</span>"
+            f"<span class='racers-list__marker'>{html_escape(marker, quote=False)}</span>"
             f"<span class='racers-list__name'>{html_escape(str(item.get('agent_id') or ''), quote=False)}</span>"
             f"<span class='racers-list__score'>{html_escape(str(score if score is not None else 'n/a'), quote=False)}</span>"
             "</li>"
@@ -265,45 +392,47 @@ def _race_hero_html(race: Dict[str, Any]) -> str:
 
     user_rank = race.get("rank")
     user_score = race.get("score")
-    gap_to_one = race.get("gap_to_one")
     callout = race.get("callout") or "race live"
     phase = race.get("phase") or "waiting"
+    event_chips = "".join(
+        f"<span class='event-chip'>{html_escape(str(chip), quote=False)}</span>"
+        for chip in (story.get("chips") if isinstance(story.get("chips"), list) else [])
+    )
+    ticker = story.get("ticker") or "LIVE RACE FEED · Waiting for leaderboard data"
     return f"""
-    <section class="race-hero card">
+    <section class="race-hero card" aria-label="Live Email Game race visualization">
       <div class="race-hero__canvas-wrap">
         <div class="race-hero__canvas" id="race-canvas" aria-hidden="true"></div>
         <div class="race-hero__overlay">
           <div class="race-hero__title">
             <span class="race-hero__kicker">Email Race Control</span>
-            <h1>3D Email Pod Race</h1>
-            <p>Live leaderboard-driven pods loop the track. The highlighted racer is you.</p>
+            <h1>Live Email Pod Race</h1>
+          </div>
+          <div class="race-story">
+            <div class="race-story__headline">{html_escape(str(story.get('headline') or 'Race live'), quote=False)}</div>
+            <div class="race-story__grid">
+              <span>{html_escape(str(story.get('rank_text') or ('Rank #' + str(user_rank or 'n/a'))), quote=False)}</span>
+              <span>Score {html_escape(str(user_score if user_score is not None else 'n/a'), quote=False)}</span>
+              <span>{html_escape(str(story.get('next_gap_text') or 'Next target n/a'), quote=False)}</span>
+              <span>{html_escape(str(story.get('gap_to_one_text') or 'Gap to #1 n/a'), quote=False)}</span>
+              <span>{html_escape(str(story.get('buffer_text') or 'Buffer n/a'), quote=False)}</span>
+            </div>
           </div>
           <div class="race-badges">
-            <span class="chip">Rank #{html_escape(str(user_rank or 'n/a'), quote=False)}</span>
-            <span class="chip">Score {html_escape(str(user_score if user_score is not None else 'n/a'), quote=False)}</span>
-            <span class="chip">Gap to #1 {html_escape(str(gap_to_one if gap_to_one is not None else 'n/a'), quote=False)}</span>
             <span class="chip race-callout" id="race-callout">{html_escape(str(callout), quote=False)}</span>
+            {event_chips}
           </div>
           <div class="race-user-pill">
-            <span class="race-user-pill__label">YOU</span>
+            <span class="race-user-pill__label">YOU *</span>
             <span class="race-user-pill__name">letlhogonolo_fanampe</span>
             <span class="race-user-pill__phase">{html_escape(str(phase), quote=False)}</span>
           </div>
-        </div>
-      </div>
-      <div class="race-hero__legend">
-        <div class="race-legend__header">
-          <div>
-            <div class="label">Visible racers</div>
-            <h2>Top of the board</h2>
+          <div class="race-hero__strip">
+            <ul class="racers-list" id="racers-list">
+              {''.join(rows) if rows else '<li class="racers-list__item"><span class="racers-list__rank">#1</span><span class="racers-list__marker">LIVE</span><span class="racers-list__name">Waiting for leaderboard data</span><span class="racers-list__score">n/a</span></li>'}
+            </ul>
           </div>
-          <div class="race-legend__state">{html_escape(str(phase), quote=False)}</div>
-        </div>
-        <ul class="racers-list" id="racers-list">
-          {''.join(rows) if rows else '<li class="racers-list__item"><span class="racers-list__rank">#1</span><span class="racers-list__name">Waiting for leaderboard data</span><span class="racers-list__score">n/a</span></li>'}
-        </ul>
-        <div class="race-legend__note">
-          {('Idle hover active' if str(phase).lower() in {'waiting', 'between matches'} else 'Camera drift and surge motion stay active')}
+          <div class="race-ticker"><span>{html_escape(str(ticker), quote=False)}</span></div>
         </div>
       </div>
     </section>
@@ -781,11 +910,6 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     last_status = status.get("phase", "waiting")
     race_hero_html = _race_hero_html(race)
     race_script_html = _dashboard_script(race)
-    button_html = (
-        f"<a class='button' href='{html_escape(public_url, quote=True)}' target='_blank' rel='noreferrer'>Open Race Control Dashboard</a>"
-        if public_url
-        else "<span class='button muted'>Dashboard tunnel not active</span>"
-    )
     rows = []
     for item in top5:
         if not isinstance(item, dict):
@@ -857,7 +981,7 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     .card {{
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 20px;
+      border-radius: 8px;
       box-shadow: 0 20px 50px rgba(0,0,0,0.2);
       backdrop-filter: blur(12px);
     }}
@@ -867,18 +991,21 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     }}
     .race-hero__canvas-wrap {{
       position: relative;
-      min-height: 420px;
+      min-height: clamp(460px, 62vh, 720px);
       background:
+        linear-gradient(rgba(102, 217, 255, 0.08) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(102, 217, 255, 0.08) 1px, transparent 1px),
         radial-gradient(circle at 50% 20%, rgba(102, 217, 255, 0.18), transparent 34%),
         radial-gradient(circle at 70% 0%, rgba(125, 255, 178, 0.1), transparent 26%),
         linear-gradient(180deg, rgba(5, 10, 18, 0.2), rgba(5, 10, 18, 0.7));
+      background-size: 34px 34px, 34px 34px, auto, auto, auto;
     }}
     .race-hero__canvas {{
       position: absolute;
       inset: 0;
       width: 100%;
       height: 100%;
-      min-height: 420px;
+      min-height: clamp(460px, 62vh, 720px);
     }}
     .race-hero__overlay {{
       position: relative;
@@ -886,7 +1013,7 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       display: grid;
       gap: 16px;
       align-content: start;
-      min-height: 420px;
+      min-height: clamp(460px, 62vh, 720px);
       padding: 20px;
       background:
         linear-gradient(180deg, rgba(7, 13, 24, 0.08), rgba(7, 13, 24, 0.34) 55%, rgba(7, 13, 24, 0.72));
@@ -895,22 +1022,43 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       margin: 6px 0 0;
       font-size: clamp(30px, 6vw, 64px);
       line-height: 0.92;
-      letter-spacing: -0.05em;
+      letter-spacing: 0;
       max-width: 10ch;
-    }}
-    .race-hero__title p {{
-      margin: 12px 0 0;
-      max-width: 58ch;
-      color: rgba(237, 244, 255, 0.78);
-      line-height: 1.55;
-      font-size: 15px;
     }}
     .race-hero__kicker {{
       color: var(--accent-2);
       text-transform: uppercase;
-      letter-spacing: 0.18em;
+      letter-spacing: 0;
       font-size: 11px;
       font-weight: 800;
+    }}
+    .race-story {{
+      width: min(100%, 540px);
+      padding: 14px;
+      border: 1px solid rgba(125, 255, 178, 0.24);
+      border-radius: 8px;
+      background: rgba(4, 12, 21, 0.62);
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.24);
+    }}
+    .race-story__headline {{
+      color: var(--accent-2);
+      font-size: clamp(22px, 5vw, 44px);
+      font-weight: 900;
+      line-height: 1;
+      letter-spacing: 0;
+      margin-bottom: 10px;
+    }}
+    .race-story__grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      color: rgba(237, 244, 255, 0.82);
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+    }}
+    .race-story__grid span:first-child {{
+      color: var(--text);
+      font-weight: 900;
     }}
     .race-badges {{
       display: flex;
@@ -923,7 +1071,18 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       border-color: rgba(102, 217, 255, 0.26);
       color: #dff7ff;
       text-transform: uppercase;
-      letter-spacing: 0.08em;
+      letter-spacing: 0;
+    }}
+    .event-chip {{
+      display: inline-flex;
+      align-items: center;
+      padding: 7px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(125, 255, 178, 0.22);
+      background: rgba(125, 255, 178, 0.1);
+      color: #dfffe9;
+      font-size: 12px;
+      font-weight: 800;
     }}
     .race-callout.is-pulse {{
       animation: calloutPulse 1.1s ease-out 1;
@@ -946,7 +1105,7 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       background: linear-gradient(135deg, var(--accent), var(--accent-2));
       color: #07121f;
       font-weight: 900;
-      letter-spacing: 0.1em;
+      letter-spacing: 0;
       font-size: 11px;
     }}
     .race-user-pill__name {{
@@ -957,63 +1116,59 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       color: rgba(237, 244, 255, 0.68);
       font-size: 12px;
     }}
-    .race-hero__legend {{
-      position: relative;
-      z-index: 2;
-      padding: 16px 20px 18px;
-      border-top: 1px solid rgba(255,255,255,0.08);
-      background: rgba(6, 11, 20, 0.78);
-    }}
-    .race-legend__header {{
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 12px;
-    }}
-    .race-legend__header h2 {{
-      margin: 2px 0 0;
-      font-size: clamp(18px, 3vw, 26px);
-      letter-spacing: -0.03em;
-    }}
-    .race-legend__state {{
-      color: var(--accent-2);
-      text-transform: uppercase;
-      letter-spacing: 0.12em;
-      font-size: 11px;
-      font-weight: 800;
-      white-space: nowrap;
+    .race-hero__strip {{
+      align-self: end;
+      margin-top: auto;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.09);
+      background: rgba(4, 10, 18, 0.66);
+      overflow-x: auto;
     }}
     .racers-list {{
       list-style: none;
       margin: 0;
       padding: 0;
-      display: grid;
+      display: flex;
       gap: 8px;
+      min-width: min-content;
     }}
     .racers-list__item {{
       display: grid;
-      grid-template-columns: auto 1fr auto;
+      grid-template-columns: auto auto 1fr;
       gap: 10px;
       align-items: center;
-      padding: 10px 12px;
-      border-radius: 14px;
+      min-width: 180px;
+      padding: 9px 10px;
+      border-radius: 8px;
       border: 1px solid rgba(255,255,255,0.06);
       background: rgba(255,255,255,0.03);
-      font-size: 14px;
+      font-size: 13px;
     }}
     .racers-list__item.is-user {{
       border-color: rgba(102, 217, 255, 0.26);
-      background: rgba(102, 217, 255, 0.08);
-      box-shadow: 0 0 0 1px rgba(125, 255, 178, 0.08);
+      background: rgba(125, 255, 178, 0.12);
+      box-shadow: 0 0 0 1px rgba(125, 255, 178, 0.18), 0 0 28px rgba(125, 255, 178, 0.12);
     }}
     .racers-list__rank {{
       color: var(--muted);
       font-variant-numeric: tabular-nums;
     }}
+    .racers-list__marker {{
+      padding: 3px 6px;
+      border-radius: 999px;
+      background: rgba(102, 217, 255, 0.12);
+      color: var(--accent);
+      font-size: 10px;
+      font-weight: 900;
+    }}
+    .racers-list__item.is-user .racers-list__marker {{
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #06111e;
+    }}
     .racers-list__name {{
       font-weight: 700;
-      letter-spacing: -0.02em;
+      letter-spacing: 0;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -1022,15 +1177,27 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       color: var(--text);
     }}
     .racers-list__score {{
+      grid-column: 1 / -1;
       color: var(--accent-2);
       font-variant-numeric: tabular-nums;
       font-weight: 800;
     }}
-    .race-legend__note {{
-      margin-top: 12px;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.5;
+    .race-ticker {{
+      align-self: end;
+      width: 100%;
+      overflow: hidden;
+      border-top: 1px solid rgba(255,255,255,0.1);
+      padding-top: 9px;
+      color: rgba(237, 244, 255, 0.78);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }}
+    .race-ticker span {{
+      display: inline-block;
+      min-width: 100%;
+      animation: tickerSlide 24s linear infinite;
     }}
     .race-fallback {{
       position: absolute;
@@ -1079,6 +1246,10 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       0% {{ transform: translateY(0) scale(1); filter: brightness(1); }}
       40% {{ transform: translateY(-1px) scale(1.04); filter: brightness(1.2); }}
       100% {{ transform: translateY(0) scale(1); filter: brightness(1); }}
+    }}
+    @keyframes tickerSlide {{
+      0% {{ transform: translateX(0); }}
+      100% {{ transform: translateX(-42%); }}
     }}
     .hero-main {{
       padding: 24px;
@@ -1147,7 +1318,7 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       color: var(--muted);
       font-size: 12px;
       text-transform: uppercase;
-      letter-spacing: 0.12em;
+      letter-spacing: 0;
       font-weight: 700;
       margin-bottom: 8px;
     }}
@@ -1222,12 +1393,9 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     }}
     @media (max-width: 920px) {{
       .hero, .grid, .two-col, .stat-grid {{ grid-template-columns: 1fr; }}
-      .race-hero__canvas-wrap, .race-hero__overlay {{ min-height: 360px; }}
+      .race-hero__canvas-wrap, .race-hero__overlay, .race-hero__canvas {{ min-height: 58vh; }}
       .race-hero__overlay {{
         padding: 16px;
-      }}
-      .race-legend__header {{
-        flex-direction: column;
       }}
     }}
     @media (max-width: 640px) {{
@@ -1247,17 +1415,27 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       .button-row {{
         align-items: stretch;
       }}
-      .race-hero__canvas-wrap, .race-hero__overlay {{
-        min-height: 320px;
+      .race-hero__canvas-wrap, .race-hero__overlay, .race-hero__canvas {{
+        min-height: 64vh;
       }}
-      .race-hero__title p {{
-        font-size: 14px;
+      .race-story {{
+        padding: 12px;
       }}
-      .racers-list__item {{
-        grid-template-columns: auto 1fr;
+      .race-story__grid {{
+        grid-template-columns: 1fr;
       }}
-      .racers-list__score {{
-        grid-column: 2;
+      .race-ticker span {{
+        animation-duration: 18s;
+      }}
+    }}
+    @media (prefers-reduced-motion: reduce) {{
+      *, *::before, *::after {{
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+      }}
+      .race-ticker span {{
+        transform: none;
       }}
     }}
   </style>
@@ -1265,27 +1443,14 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
 <body>
   <div class="wrap">
     {race_hero_html}
-    <div class="hero">
-      <div class="card hero-main">
-        <div class="kicker">Email Game Race Control</div>
-        <h1>🏁 Open Race Control Dashboard</h1>
-        <div class="sub">
-          Read-only view for the live Email Game agent, monitor, leaderboard, and coach signals.
-          Protected access is required.
-        </div>
-        <div class="button-row">
-          {button_html}
-          <span class="chip">Agent { 'running' if status['agent_running'] else 'stopped' }</span>
-          <span class="chip">Monitor { 'running' if status['monitor_running'] else 'stopped' }</span>
-          <span class="chip">Phase: {html_escape(last_status, quote=False)}</span>
-        </div>
-      </div>
+    <div class="hero hero--compact">
       <div class="card panel">
         <h2>Quick Status</h2>
         <div class="small"><span class="good">Rank</span> #{leaderboard.get('rank') or 'n/a'}</div>
         <div class="small"><span class="good">Score</span> {leaderboard.get('score') if leaderboard.get('score') is not None else 'n/a'}</div>
-        <div class="small"><span class="warn">Gap to #4</span> {leaderboard.get('gap_to_four') if leaderboard.get('gap_to_four') is not None else 'n/a'}</div>
-        <div class="small"><span class="warn">Gap to #1</span> {leaderboard.get('gap_to_one') if leaderboard.get('gap_to_one') is not None else 'n/a'}</div>
+        <div class="small"><span class="warn">Next target</span> {html_escape(str(race.get('story', {}).get('next_gap_text') if isinstance(race.get('story'), dict) else 'n/a'), quote=False)}</div>
+        <div class="small"><span class="warn">Buffer</span> {html_escape(str(race.get('story', {}).get('buffer_text') if isinstance(race.get('story'), dict) else 'n/a'), quote=False)}</div>
+        <div class="small"><span class="warn">Leader</span> {html_escape(str(race.get('story', {}).get('gap_to_one_text') if isinstance(race.get('story'), dict) else 'n/a'), quote=False)}</div>
         <div class="small" style="margin-top: 12px;">Updated: {html_escape(str(summary.get('generated_at') or ''), quote=False)}</div>
       </div>
     </div>
