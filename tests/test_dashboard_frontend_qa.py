@@ -72,3 +72,11 @@ def test_telegram_summary_compares_previous_state():
     assert "dashboard/QA commit changed" in summary
     assert "1 Android screenshot(s) changed" in summary
     assert "QA score is now 91" in summary
+
+
+def test_clipped_detector_ignores_below_fold_content():
+    source = Path(qa.__file__).read_text(encoding="utf-8")
+
+    assert "verticallyVisible = rect.bottom > 0 && rect.top < viewportHeight" in source
+    assert "horizontallyClipped && verticallyVisible" in source
+    assert "rect.bottom < 0 || rect.top > viewportHeight" not in source

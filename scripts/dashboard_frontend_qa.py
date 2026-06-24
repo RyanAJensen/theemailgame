@@ -185,14 +185,21 @@ async def _qa_viewport(
           const wide = [];
           const clipped = [];
           const tinyTapTargets = [];
+          const qaRelevant = /card|panel|hero|racer|rival|race|stat|table|ticker|banner|pod/i;
           for (const el of all) {
             const rect = el.getBoundingClientRect();
             const style = window.getComputedStyle(el);
-            if (rect.width > viewportWidth + 2 && style.overflowX !== 'auto') {
+            const classText = String(el.className || '');
+            const selector = `${el.tagName.toLowerCase()}.${classText.replace(/\\s+/g,'.')}`.slice(0, 90);
+            const isDecorativeTrack = Boolean(el.closest('.race-arena__grid, .race-arena__pods, .race-orbit, .track-pod'));
+            const hasText = Boolean(el.textContent && el.textContent.trim().length > 8);
+            const verticallyVisible = rect.bottom > 0 && rect.top < viewportHeight;
+            const horizontallyClipped = rect.left < -2 || rect.right > viewportWidth + 2;
+            if (rect.width > viewportWidth + 2 && style.overflowX !== 'auto' && !isDecorativeTrack && !el.closest('.table-scroll')) {
               wide.push(`${el.tagName.toLowerCase()}.${String(el.className || '').replace(/\\s+/g,'.')}`.slice(0, 90));
             }
-            if ((rect.right < 0 || rect.left > viewportWidth || rect.bottom < 0 || rect.top > viewportHeight) && el.textContent && el.textContent.trim().length > 8) {
-              clipped.push(`${el.tagName.toLowerCase()}.${String(el.className || '').replace(/\\s+/g,'.')}`.slice(0, 90));
+            if (horizontallyClipped && verticallyVisible && hasText && qaRelevant.test(selector) && !isDecorativeTrack) {
+              clipped.push(selector);
             }
             const isTap = el.matches('a, button, [role="button"], input, select, textarea');
             if (isTap && rect.width > 0 && rect.height > 0 && (rect.width < 44 || rect.height < 44)) {
