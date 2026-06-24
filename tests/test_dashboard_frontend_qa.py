@@ -74,6 +74,20 @@ def test_telegram_summary_compares_previous_state():
     assert "QA score is now 91" in summary
 
 
+def test_telegram_summary_strips_double_punctuation():
+    result = qa.QAResult(
+        score=100,
+        readiness="excellent",
+        main_issue="No major mobile layout issue detected.",
+        screenshots=["dashboard_qa/screenshots/home-412x915.png"],
+    )
+
+    summary = qa._telegram_summary(result, {}, "abc123", {"shot.png": "hash"})
+
+    assert "detected.." not in summary
+    assert summary.endswith("detected.")
+
+
 def test_clipped_detector_ignores_below_fold_content():
     source = Path(qa.__file__).read_text(encoding="utf-8")
 

@@ -510,17 +510,19 @@ def _write_last_report_state(result: QAResult, summary: str, commit: str, screen
 
 
 def _telegram_summary(result: QAResult, previous: Dict[str, Any], commit: str, screenshot_hashes: Dict[str, str]) -> str:
+    main_issue = result.main_issue.rstrip(".")
+    recommendation = result.recommendation.rstrip(".")
     if not previous:
         if not result.screenshots:
             return (
                 "Dashboard QA complete. Browser screenshots were not captured because browser automation is unavailable. "
-                f"Current readiness: {result.readiness}; main issue: {result.main_issue}. "
-                f"Recommendation: {result.recommendation}"
+                f"Current readiness: {result.readiness}; main issue: {main_issue}. "
+                f"Recommendation: {recommendation}."
             )
         return (
             "Dashboard QA complete. Initial Android screenshots were captured, the protected dashboard was checked for "
             f"overflow, clipped hero cards, above-the-fold race numbers, console errors, and network failures. Current readiness: "
-            f"{result.readiness}; main issue: {result.main_issue}."
+            f"{result.readiness}; main issue: {main_issue}."
         )
     changes: List[str] = []
     if previous.get("last_git_commit") != commit:
@@ -540,7 +542,7 @@ def _telegram_summary(result: QAResult, previous: Dict[str, Any], commit: str, s
     return (
         "Dashboard QA complete. Since the last screenshots, "
         + ", ".join(changes)
-        + f". Main issue: {result.main_issue}. Recommendation: {result.recommendation}"
+        + f". Main issue: {main_issue}. Recommendation: {recommendation}."
     )
 
 
