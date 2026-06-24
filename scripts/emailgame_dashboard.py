@@ -368,13 +368,20 @@ def _race_hero_html(race: Dict[str, Any]) -> str:
     story = race.get("story") if isinstance(race.get("story"), dict) else {}
     rows = []
     pod_rows = []
+    pod_slots_by_rank = {
+        1: ("70%", "74%"),
+        2: ("51%", "34%"),
+        3: ("62%", "56%"),
+        4: ("44%", "58%"),
+        5: ("80%", "32%"),
+    }
     pod_slots = [
-        ("50%", "70%"),
-        ("50%", "28%"),
-        ("78%", "42%"),
-        ("24%", "54%"),
-        ("82%", "18%"),
-        ("20%", "78%"),
+        ("44%", "58%"),
+        ("62%", "56%"),
+        ("51%", "34%"),
+        ("80%", "32%"),
+        ("70%", "74%"),
+        ("24%", "78%"),
     ]
     for item in top_competitors:
         if not isinstance(item, dict):
@@ -413,7 +420,7 @@ def _race_hero_html(race: Dict[str, Any]) -> str:
         elif rank == 5:
             pod_classes.append("is-chaser")
         short_name = "YOU" if item.get("is_user") else str(item.get("agent_id") or "rival").replace("house_bot_", "bot_")[:10]
-        slot_x, slot_y = pod_slots[len(pod_rows) % len(pod_slots)]
+        slot_x, slot_y = pod_slots_by_rank.get(rank, pod_slots[len(pod_rows) % len(pod_slots)])
         pod_rows.append(
             "<div class='" + " ".join(pod_classes) + "' "
             "data-racer-visual='true' "
@@ -1076,26 +1083,27 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       justify-content: space-between;
       align-items: end;
       gap: 12px;
-      padding: 14px 18px 10px;
+      padding: 10px 16px 8px;
       border-bottom: 1px solid rgba(255,255,255,0.08);
       background: rgba(5, 12, 22, 0.72);
     }}
     .race-hero__title-strip h1 {{
       margin: 0;
-      font-size: clamp(18px, 4vw, 34px);
+      font-size: clamp(16px, 3.4vw, 30px);
       line-height: 0.95;
       letter-spacing: -0.04em;
       text-align: right;
     }}
     .race-hero__canvas-wrap {{
       position: relative;
-      min-height: clamp(360px, 48vh, 520px);
+      min-height: clamp(440px, 58vh, 620px);
       background:
-        linear-gradient(rgba(102, 217, 255, 0.08) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(102, 217, 255, 0.08) 1px, transparent 1px),
-        radial-gradient(circle at 50% 20%, rgba(102, 217, 255, 0.18), transparent 34%),
-        radial-gradient(circle at 70% 0%, rgba(125, 255, 178, 0.1), transparent 26%),
-        linear-gradient(180deg, rgba(5, 10, 18, 0.2), rgba(5, 10, 18, 0.7));
+        linear-gradient(rgba(102, 217, 255, 0.1) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(102, 217, 255, 0.1) 1px, transparent 1px),
+        radial-gradient(circle at 46% 48%, rgba(125, 255, 178, 0.26), transparent 28%),
+        radial-gradient(circle at 62% 20%, rgba(102, 217, 255, 0.28), transparent 34%),
+        radial-gradient(circle at 75% 78%, rgba(255, 209, 102, 0.1), transparent 24%),
+        linear-gradient(180deg, rgba(5, 10, 18, 0.05), rgba(5, 10, 18, 0.56));
       background-size: 34px 34px, 34px 34px, auto, auto, auto;
     }}
     .race-hero__canvas {{
@@ -1103,15 +1111,15 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       inset: 0;
       width: 100%;
       height: 100%;
-      min-height: clamp(360px, 48vh, 520px);
+      min-height: clamp(440px, 58vh, 620px);
     }}
     .race-arena {{
       position: absolute;
       inset: 0;
       overflow: hidden;
       background:
-        radial-gradient(circle at 50% 42%, rgba(125,255,178,0.12), transparent 24%),
-        radial-gradient(circle at 50% 55%, rgba(102,217,255,0.1), transparent 42%);
+        radial-gradient(circle at 52% 56%, rgba(125,255,178,0.2), transparent 24%),
+        radial-gradient(circle at 50% 55%, rgba(102,217,255,0.18), transparent 46%);
     }}
     .race-arena__grid {{
       position: absolute;
@@ -1129,28 +1137,47 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       position: absolute;
       left: 50%;
       top: 50%;
-      width: min(88vw, 760px);
-      height: min(48vw, 380px);
-      min-height: 260px;
+      width: min(108vw, 900px);
+      height: min(60vw, 460px);
+      min-height: 330px;
       transform: translate(-50%, -50%);
       border: 2px solid rgba(102,217,255,0.58);
       border-radius: 50%;
       box-shadow:
-        0 0 0 18px rgba(102,217,255,0.06),
-        inset 0 0 0 18px rgba(125,255,178,0.04),
-        0 0 80px rgba(102,217,255,0.22);
+        0 0 0 24px rgba(102,217,255,0.08),
+        inset 0 0 0 18px rgba(125,255,178,0.07),
+        inset 0 0 70px rgba(102,217,255,0.12),
+        0 0 110px rgba(102,217,255,0.34);
+      animation: trackPulse 3.2s ease-in-out infinite;
     }}
     .race-arena__inner {{
       position: absolute;
       left: 50%;
       top: 50%;
-      width: min(56vw, 480px);
-      height: min(30vw, 240px);
-      min-height: 150px;
+      width: min(70vw, 560px);
+      height: min(38vw, 300px);
+      min-height: 190px;
       transform: translate(-50%, -50%);
       border: 1px solid rgba(125,255,178,0.24);
       border-radius: 50%;
       box-shadow: inset 0 0 36px rgba(125,255,178,0.08);
+      animation: lanePulse 2.4s ease-in-out infinite;
+    }}
+    .race-arena__track::before,
+    .race-arena__track::after {{
+      content: "";
+      position: absolute;
+      inset: 14%;
+      border-radius: 50%;
+      border: 2px dashed rgba(125,255,178,0.36);
+      filter: drop-shadow(0 0 16px rgba(125,255,178,0.22));
+      animation: laneDash 10s linear infinite;
+    }}
+    .race-arena__track::after {{
+      inset: 30%;
+      border-color: rgba(102,217,255,0.28);
+      animation-duration: 7s;
+      animation-direction: reverse;
     }}
     .race-arena__pods {{
       position: absolute;
@@ -1168,11 +1195,11 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       gap: 2px 6px;
       align-items: center;
       padding: 7px 8px;
-      border: 1px solid rgba(102,217,255,0.28);
-      border-radius: 8px;
-      background: rgba(6,14,25,0.76);
-      box-shadow: 0 0 20px rgba(102,217,255,0.14);
-      animation: podHover 1.9s ease-in-out infinite;
+      border: 2px solid rgba(102,217,255,0.48);
+      border-radius: 14px;
+      background: rgba(6,14,25,0.9);
+      box-shadow: 0 0 24px rgba(102,217,255,0.28), 0 12px 34px rgba(0,0,0,0.28);
+      animation: podHover 1.9s ease-in-out infinite, podSurge 4.2s ease-in-out infinite;
       animation-delay: calc(var(--pod-index) * -0.25s);
       transform-origin: center;
       transform: translate(-50%, -50%);
@@ -1182,28 +1209,29 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       position: absolute;
       right: 78%;
       top: 50%;
-      width: 58px;
-      height: 8px;
+      width: 76px;
+      height: 11px;
       transform: translateY(-50%);
       border-radius: 999px;
-      background: linear-gradient(90deg, transparent, rgba(102,217,255,0.4));
+      background: linear-gradient(90deg, transparent, rgba(102,217,255,0.72));
       filter: blur(1px);
-      opacity: 0.7;
+      opacity: 0.92;
       z-index: -1;
     }}
     .track-pod.is-user {{
-      width: 132px;
-      min-height: 68px;
+      width: 150px;
+      min-height: 78px;
       border-color: rgba(125,255,178,0.86);
-      background: rgba(9, 38, 31, 0.86);
-      box-shadow: 0 0 0 2px rgba(125,255,178,0.22), 0 0 44px rgba(125,255,178,0.55);
+      background: rgba(9, 46, 34, 0.92);
+      box-shadow: 0 0 0 3px rgba(125,255,178,0.26), 0 0 68px rgba(125,255,178,0.76), 0 16px 44px rgba(0,0,0,0.28);
       z-index: 5;
-      animation-duration: 1.35s;
+      animation-duration: 1.25s, 3.4s;
     }}
     .track-pod.is-user::after {{
-      width: 86px;
-      height: 12px;
-      background: linear-gradient(90deg, transparent, rgba(125,255,178,0.72));
+      width: 116px;
+      height: 16px;
+      background: linear-gradient(90deg, transparent, rgba(125,255,178,0.9));
+      animation: trailFlicker 1.1s ease-in-out infinite;
     }}
     .track-pod.is-bot {{
       border-color: rgba(102,217,255,0.44);
@@ -1213,6 +1241,7 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     }}
     .track-pod.is-target {{
       border-color: rgba(125,255,178,0.48);
+      box-shadow: 0 0 36px rgba(125,255,178,0.28), 0 12px 34px rgba(0,0,0,0.28);
     }}
     .track-pod.is-chaser {{
       opacity: 0.92;
@@ -1225,22 +1254,22 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       background:
         linear-gradient(135deg, transparent 46%, rgba(255,255,255,0.55) 47% 52%, transparent 53%),
         linear-gradient(135deg, var(--accent), #1d4d73);
-      box-shadow: 0 0 18px rgba(102,217,255,0.42);
+      box-shadow: 0 0 28px rgba(102,217,255,0.68);
     }}
     .track-pod.is-user .track-pod__body {{
       background:
         linear-gradient(135deg, transparent 46%, rgba(7,18,31,0.72) 47% 52%, transparent 53%),
         linear-gradient(135deg, var(--accent-2), var(--accent));
-      box-shadow: 0 0 26px rgba(125,255,178,0.72);
+      box-shadow: 0 0 36px rgba(125,255,178,0.9);
     }}
     .track-pod__badge {{
       color: var(--warning);
-      font-size: 11px;
+      font-size: 12px;
       font-weight: 900;
     }}
     .track-pod__label {{
       color: var(--text);
-      font-size: 11px;
+      font-size: 12px;
       font-weight: 900;
       line-height: 1;
       overflow: hidden;
@@ -1249,7 +1278,7 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     }}
     .track-pod__score {{
       color: rgba(237,244,255,0.7);
-      font-size: 10px;
+      font-size: 11px;
       font-variant-numeric: tabular-nums;
     }}
     .race-chipbar {{
@@ -1257,7 +1286,7 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       z-index: 6;
       left: 12px;
       right: 12px;
-      top: 12px;
+      top: 10px;
       display: flex;
       flex-wrap: wrap;
       gap: 7px;
@@ -1270,12 +1299,12 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       padding: 6px 9px;
       border-radius: 999px;
       border: 1px solid rgba(102,217,255,0.22);
-      background: rgba(5, 13, 24, 0.68);
+      background: rgba(5, 13, 24, 0.54);
       color: rgba(237,244,255,0.86);
       font-size: 11px;
       font-weight: 900;
       font-variant-numeric: tabular-nums;
-      box-shadow: 0 10px 28px rgba(0,0,0,0.2);
+      box-shadow: 0 10px 28px rgba(0,0,0,0.16);
     }}
     .race-chip.is-hot {{
       border-color: rgba(125,255,178,0.6);
@@ -1286,14 +1315,14 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     .race-boost-trail {{
       position: absolute;
       z-index: 2;
-      left: 14%;
-      right: 14%;
-      top: 56%;
-      height: 3px;
+      left: 8%;
+      right: 8%;
+      top: 57%;
+      height: 6px;
       border-radius: 999px;
-      background: linear-gradient(90deg, transparent, rgba(125,255,178,0.74), rgba(102,217,255,0.54), transparent);
-      filter: blur(0.5px);
-      animation: boostSweep 2.8s ease-in-out infinite;
+      background: linear-gradient(90deg, transparent, rgba(125,255,178,0.95), rgba(102,217,255,0.74), transparent);
+      filter: blur(1px);
+      animation: boostSweep 2s ease-in-out infinite;
     }}
     .race-hero__details {{
       display: grid;
@@ -1513,11 +1542,11 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       bottom: 0;
       overflow: hidden;
       border-top: 1px solid rgba(255,255,255,0.08);
-      padding: 8px 12px;
-      background: rgba(4, 10, 18, 0.58);
-      color: rgba(237, 244, 255, 0.78);
-      font-size: 12px;
-      font-weight: 800;
+      padding: 10px 12px;
+      background: linear-gradient(90deg, rgba(4, 10, 18, 0.84), rgba(15, 55, 44, 0.66), rgba(4, 10, 18, 0.84));
+      color: rgba(237, 244, 255, 0.92);
+      font-size: 13px;
+      font-weight: 900;
       text-transform: uppercase;
       white-space: nowrap;
     }}
@@ -1586,6 +1615,19 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       0%, 100% {{ opacity: 0.28; transform: translateX(-8%) scaleX(0.82); }}
       50% {{ opacity: 0.85; transform: translateX(8%) scaleX(1.08); }}
     }}
+    @keyframes laneDash {{
+      0% {{ transform: rotate(0deg); opacity: 0.68; }}
+      50% {{ opacity: 1; }}
+      100% {{ transform: rotate(360deg); opacity: 0.68; }}
+    }}
+    @keyframes lanePulse {{
+      0%, 100% {{ box-shadow: inset 0 0 34px rgba(125,255,178,0.1), 0 0 18px rgba(125,255,178,0.08); opacity: 0.78; }}
+      50% {{ box-shadow: inset 0 0 70px rgba(125,255,178,0.18), 0 0 48px rgba(125,255,178,0.18); opacity: 1; }}
+    }}
+    @keyframes trackPulse {{
+      0%, 100% {{ filter: brightness(1); }}
+      50% {{ filter: brightness(1.24); }}
+    }}
     @keyframes podOrbit {{
       0% {{ transform: translate(-50%, -50%) rotate(calc(var(--pod-index) * 72deg)) translateX(min(39vw, 330px)) rotate(calc(var(--pod-index) * -72deg)); }}
       100% {{ transform: translate(-50%, -50%) rotate(calc(360deg + var(--pod-index) * 72deg)) translateX(min(39vw, 330px)) rotate(calc(-360deg - var(--pod-index) * 72deg)); }}
@@ -1593,6 +1635,15 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     @keyframes podHover {{
       0%, 100% {{ margin-top: -2px; filter: brightness(1); }}
       50% {{ margin-top: 7px; filter: brightness(1.22); }}
+    }}
+    @keyframes podSurge {{
+      0%, 100% {{ margin-left: -2px; }}
+      50% {{ margin-left: 9px; }}
+    }}
+    @keyframes trailFlicker {{
+      0%, 100% {{ opacity: 0.55; transform: translateY(-50%) scaleX(0.72); }}
+      45% {{ opacity: 1; transform: translateY(-50%) scaleX(1.18); }}
+      70% {{ opacity: 0.78; transform: translateY(-50%) scaleX(0.9); }}
     }}
     .hero-main {{
       padding: 24px;
@@ -1759,7 +1810,7 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     }}
     @media (max-width: 920px) {{
       .hero, .grid, .two-col, .stat-grid {{ grid-template-columns: 1fr; }}
-      .race-hero__canvas-wrap, .race-hero__canvas {{ min-height: 440px; }}
+      .race-hero__canvas-wrap, .race-hero__canvas {{ min-height: 520px; }}
       .race-hero__details {{ grid-template-columns: 1fr; }}
       .race-hero__overlay {{
         padding: 16px;
@@ -1784,31 +1835,33 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       }}
       .race-hero__title-strip {{
         align-items: start;
-        padding: 12px 14px 9px;
+        padding: 9px 12px 7px;
       }}
       .race-hero__title-strip h1 {{
         max-width: 11ch;
       }}
       .race-hero__canvas-wrap, .race-hero__canvas {{
-        min-height: 430px;
+        min-height: 500px;
       }}
       .race-arena__track {{
-        width: min(118vw, 470px);
-        height: 310px;
+        width: min(126vw, 530px);
+        height: 390px;
       }}
       .race-arena__inner {{
-        width: min(72vw, 280px);
-        height: 170px;
+        width: min(84vw, 350px);
+        height: 230px;
       }}
       .track-pod {{
-        width: 76px;
-        min-height: 50px;
+        width: 84px;
+        min-height: 56px;
         padding: 6px;
       }}
       .track-pod.is-user {{
-        width: 112px;
-        min-height: 62px;
+        width: 128px;
+        min-height: 70px;
       }}
+      .track-pod::after {{ width: 64px; }}
+      .track-pod.is-user::after {{ width: 94px; }}
       .track-pod__label {{
         font-size: 10px;
       }}
