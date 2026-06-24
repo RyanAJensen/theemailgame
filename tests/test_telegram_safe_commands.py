@@ -11,6 +11,17 @@ def test_coach_is_authorized_for_tester_bot_only():
     human_message = {"from": {"is_bot": False, "username": "EmailGameTesterBot"}}
 
     assert monitor._is_authorized_bot_to_bot_message(tester_message, "/coach") is True
+    assert monitor._is_authorized_bot_to_bot_message(tester_message, "/dashboard") is True
+    assert monitor._is_authorized_bot_to_bot_message(tester_message, "/dashboard_url") is True
     assert monitor._is_authorized_bot_to_bot_message(tester_message, "/startagent") is False
     assert monitor._is_authorized_bot_to_bot_message(wrong_bot_message, "/coach") is False
     assert monitor._is_authorized_bot_to_bot_message(human_message, "/coach") is False
+
+
+def test_dashboard_reply_markup_includes_button_when_link_exists():
+    monitor = object.__new__(EmailGameMonitor)
+
+    reply_markup = monitor._dashboard_reply_markup()
+    assert reply_markup is not None
+    assert reply_markup["inline_keyboard"][0][0]["text"] == "Open Race Control Dashboard"
+    assert "trycloudflare.com/d/" in reply_markup["inline_keyboard"][0][0]["url"]

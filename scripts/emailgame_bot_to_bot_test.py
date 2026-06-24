@@ -31,6 +31,8 @@ REPORT_CHAT_ENV = "EMAIL_GAME_TEST_REPORT_CHAT_ID"
 SAFE_COMMANDS = [
     "/help",
     "/coach",
+    "/dashboard",
+    "/dashboard_url",
     "/status",
     "/logs",
     "/match",

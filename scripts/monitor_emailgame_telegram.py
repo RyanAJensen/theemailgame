@@ -66,6 +66,8 @@ HOUSE_BOT_IDS = {"house_bot_1", "house_bot_2", "house_bot_3"}
 BOT_TO_BOT_SAFE_COMMANDS = {
     "/help",
     "/coach",
+    "/dashboard",
+    "/dashboard_url",
     "/status",
     "/logs",
     "/match",
@@ -151,6 +153,13 @@ def _clean_log_text(text: str) -> str:
     while cleaned_lines and cleaned_lines[-1] == "":
         cleaned_lines.pop()
     return "\n".join(cleaned_lines)
+
+
+def _read_text_file(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
 
 
 def _now_sast() -> datetime:
@@ -657,7 +666,13 @@ class TelegramClient:
         )
         return latest + 1 if latest >= 0 else 0
 
-    def send(self, message: str, parse_mode: str = TELEGRAM_PARSE_MODE, chat_id: Optional[str] = None) -> bool:
+    def send(
+        self,
+        message: str,
+        parse_mode: str = TELEGRAM_PARSE_MODE,
+        chat_id: Optional[str] = None,
+        reply_markup: Optional[Dict[str, object]] = None,
+    ) -> bool:
         message = message.strip()
         if not message:
             return False
@@ -667,14 +682,15 @@ class TelegramClient:
             return False
         self._warn_if_config_looks_invalid()
 
-        payload = urlencode(
-            {
-                "chat_id": chat_id or self.chat_id,
-                "text": message,
-                "parse_mode": parse_mode,
-                "disable_web_page_preview": "true",
-            }
-        ).encode("utf-8")
+        payload_dict: Dict[str, object] = {
+            "chat_id": chat_id or self.chat_id,
+            "text": message,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": "true",
+        }
+        if reply_markup is not None:
+            payload_dict["reply_markup"] = json.dumps(reply_markup, separators=(",", ":"))
+        payload = urlencode(payload_dict).encode("utf-8")
         request = Request(
             f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
             data=payload,
@@ -1305,10 +1321,21 @@ class EmailGameMonitor:
             return
 
         if command:
-            response = self._dispatch_command(command, parts[1:])
+            reply_markup = None
+            if command == "/dashboard":
+                response = self._dashboard_text()
+                reply_markup = self._dashboard_reply_markup()
+            elif command == "/dashboard_url":
+                response = self._dashboard_url_text()
+            else:
+                response = self._dispatch_command(command, parts[1:])
             self._record_telegram_command(command, bool(response))
             if response:
-                self._telegram_send(response, chat_id=str(chat_id) if bot_to_bot else None)
+                self._telegram_send(
+                    response,
+                    chat_id=str(chat_id) if bot_to_bot else None,
+                    reply_markup=reply_markup,
+                )
 
         self.state.telegram_offset = update_id_int + 1
         self._persist_state()
@@ -1339,6 +1366,10 @@ class EmailGameMonitor:
     def _dispatch_command(self, command: str, args: List[str]) -> str:
         if command == "/help":
             return self._help_text()
+        if command == "/dashboard":
+            return self._dashboard_text()
+        if command == "/dashboard_url":
+            return self._dashboard_url_text()
         if command == "/status":
             return self._status_text()
         if command == "/logs":
@@ -1387,6 +1418,7 @@ class EmailGameMonitor:
         return (
             "🎮 <b>Email Game Control</b>\n\n"
             "<b>Agent</b>\n"
+            "/dashboard — open the race control dashboard\n"
             "/status — current state\n"
             "/startagent — start if idle\n"
             "/restartagent — safe restart\n"
@@ -1415,9 +1447,20 @@ class EmailGameMonitor:
             "Note: house_bot_* are built-in competition bots/opponents."
         )
 
-    def _telegram_send(self, message: str, chat_id: Optional[str] = None) -> None:
+    def _telegram_send(
+        self,
+        message: str,
+        chat_id: Optional[str] = None,
+        reply_markup: Optional[Dict[str, object]] = None,
+    ) -> None:
         for chunk in _chunk_text(message):
-            self.telegram.send(chunk, parse_mode=TELEGRAM_PARSE_MODE, chat_id=chat_id)
+            self.telegram.send(
+                chunk,
+                parse_mode=TELEGRAM_PARSE_MODE,
+                chat_id=chat_id,
+                reply_markup=reply_markup,
+            )
+            reply_markup = None
 
     def _coach(self) -> EmailGameCoach:
         return EmailGameCoach(
@@ -1438,6 +1481,37 @@ class EmailGameMonitor:
 
     def _coach_text(self) -> str:
         return self._coach().telegram_coach_text()
+
+    def _dashboard_url_text(self) -> str:
+        url = _read_text_file(PROJECT_ROOT / "agent_logs" / "emailgame-dashboard-url.txt")
+        if not url:
+            return (
+                "🏁 <b>Email Game Race Control</b>\n\n"
+                "Dashboard is running locally, but no mobile link is active yet.\n"
+                "Ask Codex to start the dashboard tunnel."
+            )
+        return (
+            "🏁 <b>Email Game Race Control</b>\n\n"
+            f"Open dashboard:\n<code>{html_escape(url, quote=False)}</code>"
+        )
+
+    def _dashboard_text(self) -> str:
+        return self._dashboard_url_text()
+
+    def _dashboard_reply_markup(self) -> Optional[Dict[str, object]]:
+        url = _read_text_file(PROJECT_ROOT / "agent_logs" / "emailgame-dashboard-url.txt")
+        if not url:
+            return None
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "Open Race Control Dashboard",
+                        "url": url,
+                    }
+                ]
+            ]
+        }
 
     def _budget_text(self) -> str:
         return self._budget().budget_text()
