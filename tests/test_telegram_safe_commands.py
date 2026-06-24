@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from scripts import monitor_emailgame_telegram as monitor_module
 from scripts.monitor_emailgame_telegram import EmailGameMonitor
 
 
@@ -18,10 +19,15 @@ def test_coach_is_authorized_for_tester_bot_only():
     assert monitor._is_authorized_bot_to_bot_message(human_message, "/coach") is False
 
 
-def test_dashboard_reply_markup_includes_button_when_link_exists():
+def test_dashboard_reply_markup_includes_button_when_link_exists(monkeypatch):
     monitor = object.__new__(EmailGameMonitor)
+    monkeypatch.setattr(
+        monitor_module,
+        "_read_text_file",
+        lambda path: "https://example.trycloudflare.com/d/test-token/" if str(path).endswith("emailgame-dashboard-url.txt") else "",
+    )
 
     reply_markup = monitor._dashboard_reply_markup()
     assert reply_markup is not None
     assert reply_markup["inline_keyboard"][0][0]["text"] == "Open Race Control Dashboard"
-    assert "trycloudflare.com/d/" in reply_markup["inline_keyboard"][0][0]["url"]
+    assert reply_markup["inline_keyboard"][0][0]["url"] == "https://example.trycloudflare.com/d/test-token/"

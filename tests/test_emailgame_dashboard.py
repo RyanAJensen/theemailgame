@@ -16,6 +16,9 @@ def test_dashboard_requires_token_and_serves_protected_api():
     root = client.get(f"/d/{token}/")
     assert root.status_code == 200
     assert "Open Race Control Dashboard" in root.text
+    assert "3D Email Pod Race" in root.text
+    assert "race-canvas" in root.text
+    assert "letlhogonolo_fanampe" in root.text
 
     health = client.get(f"/d/{token}/api/health")
     assert health.status_code == 200
@@ -23,4 +26,5 @@ def test_dashboard_requires_token_and_serves_protected_api():
     assert "status" in payload
     assert "leaderboard" in payload
     assert "coach" in payload
+    assert "race" in payload
     assert payload["status"]["monitor_running"] in {True, False}
