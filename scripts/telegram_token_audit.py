@@ -39,6 +39,9 @@ DEFAULT_MAIN_USERNAME = "EmailGameBot"
 TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
 TOKEN_KV_RE = re.compile(r"(?i)\b(token|bearer)\s*[:=]\s*[A-Za-z0-9._-]{8,}")
 URLSAFE_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_-]{32,}\b")
+BRIDGE_ROUTING_LABEL_RE = re.compile(r"routing_label=([A-Za-z0-9_]+)")
+BRIDGE_ROUTING_BOT_RE = re.compile(r"routing_bot=(@[A-Za-z0-9_]+)")
+BRIDGE_BOT_USERNAME_RE = re.compile(r"Bot username:\s*([A-Za-z0-9_]+)")
 
 
 def _load_env_file(path: Path) -> dict[str, str]:
@@ -85,6 +88,17 @@ def _mask_chat_id(value: str) -> str:
 def _all_equal(values: Iterable[str]) -> bool:
     filtered = [value for value in values if value]
     return bool(filtered) and len(set(filtered)) == 1
+
+
+def _bridge_listener_state(log_text: str) -> dict[str, str]:
+    labels = BRIDGE_ROUTING_LABEL_RE.findall(log_text or "")
+    bots = BRIDGE_ROUTING_BOT_RE.findall(log_text or "")
+    usernames = BRIDGE_BOT_USERNAME_RE.findall(log_text or "")
+    return {
+        "label": labels[-1] if labels else "",
+        "bot": bots[-1] if bots else "",
+        "username": usernames[-1] if usernames else "",
+    }
 
 
 def _telegram_request(token: str, method: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -192,6 +206,8 @@ def _safe_summary(report: dict[str, Any]) -> list[str]:
         f"report chat match: {'yes' if report['chat_matches']['report_chat'] else 'no'}",
         f"webhook conflict: {'yes' if report['webhook_conflict'] else 'no'}",
         f"polling conflict: {'yes' if report['polling_conflict'] else 'no'}",
+        f"bridge listener route: {report['bridge_listener'].get('label') or 'unknown'}",
+        f"bridge listener bot: {report['bridge_listener'].get('username') or 'unknown'}",
         f"bridge restart required: {'yes' if report['bridge_restart_required'] else 'no'}",
         f"watchdog restart required: {'yes' if report['watchdog_restart_required'] else 'no'}",
         f"handler active: {'yes' if report['handler_active'] else 'no'}",
@@ -214,8 +230,16 @@ def build_report() -> dict[str, Any]:
         or codex_telegram.get("EMAIL_GAME_TARGET_BOT_USERNAME")
         or DEFAULT_MAIN_USERNAME
     )
-    bridge_expected = codex_telegram.get("CODEX_BRIDGE_TELEGRAM_BOT_USERNAME") or ""
-    watchdog_expected = codex_watchdog.get("CODEX_WATCH_TELEGRAM_BOT_USERNAME") or ""
+    bridge_expected = (
+        codex_telegram.get("EMAIL_GAME_TESTER_BOT_USERNAME")
+        or env_local.get("EMAIL_GAME_TESTER_BOT_USERNAME")
+        or DEFAULT_TESTER_USERNAME
+    )
+    watchdog_expected = (
+        codex_watchdog.get("CODEX_WATCH_TELEGRAM_BOT_USERNAME")
+        or codex_watchdog.get("CODEX_BRIDGE_TELEGRAM_BOT_USERNAME")
+        or DEFAULT_MAIN_USERNAME
+    )
 
     bots = {
         "tester": _bot_entry(
@@ -271,6 +295,7 @@ def build_report() -> dict[str, Any]:
     watchdog_runtime = _tmux_has_session("codex-watchdog")
     bridge_log = BRIDGE_LOG_PATH.read_text(encoding="utf-8", errors="ignore") if BRIDGE_LOG_PATH.exists() else ""
     watchdog_log = WATCHDOG_LOG_PATH.read_text(encoding="utf-8", errors="ignore") if WATCHDOG_LOG_PATH.exists() else ""
+    bridge_listener = _bridge_listener_state(bridge_log)
     bridge_loaded_env = bridge_start_ok and bridge_runtime and _file_contains(
         BRIDGE_LOG_PATH,
         "telegram config source=",
@@ -342,6 +367,7 @@ def build_report() -> dict[str, Any]:
         "polling_notes": polling_notes,
         "bridge_runtime": bridge_runtime,
         "watchdog_runtime": watchdog_runtime,
+        "bridge_listener": bridge_listener,
         "bridge_loaded_env": bridge_loaded_env,
         "watchdog_loaded_env": watchdog_loaded_env,
         "bridge_restart_required": bridge_restart_required,
