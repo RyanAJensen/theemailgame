@@ -424,7 +424,10 @@ def _race_hero_html(race: Dict[str, Any]) -> str:
         pod_rows.append(
             "<div class='" + " ".join(pod_classes) + "' "
             "data-racer-visual='true' "
+            f"data-racer-id='{html_escape(str(item.get('agent_id') or ''), quote=True)}' "
             f"data-rank='{html_escape(str(rank or ''), quote=True)}' "
+            f"data-score='{html_escape(str(score if score is not None else ''), quote=True)}' "
+            f"data-agent='{html_escape(str(item.get('agent_id') or ''), quote=True)}' "
             f"style='--pod-index:{len(pod_rows)}; --pod-x:{slot_x}; --pod-y:{slot_y}; --pod-score:{html_escape(str(score if score is not None else 0), quote=True)};'>"
             f"<span class='track-pod__badge'>#{html_escape(str(item.get('rank') or ''), quote=False)}</span>"
             "<span class='track-pod__body'></span>"
@@ -472,6 +475,8 @@ def _race_hero_html(race: Dict[str, Any]) -> str:
             <div class="race-arena__pods">
               {''.join(pod_rows)}
             </div>
+            <div class="race-gap-line" aria-hidden="true"></div>
+            <div class="race-touch-burst" aria-hidden="true"></div>
           </div>
         </div>
         <div class="race-chipbar" aria-label="Compact race state">
@@ -554,6 +559,18 @@ def _dashboard_script(race: Dict[str, Any]) -> str:
       let previousRank = state.rank;
       let previousScore = state.score;
       const racerCount = 5;
+      const touchState = {{
+        focusedRacer: '',
+        selectedRival: '',
+        touchX: 0,
+        touchY: 0,
+        isDragging: false,
+        isLongPress: false,
+        lastTapTime: 0,
+        longPressTimer: 0,
+        startX: 0,
+        startY: 0,
+      }};
 
       const setCallout = (text, pulse) => {{
         if (!calloutEl) return;
@@ -561,23 +578,231 @@ def _dashboard_script(race: Dict[str, Any]) -> str:
         calloutEl.classList.toggle('is-pulse', Boolean(pulse));
       }};
 
+      const initRaceTouchInteractions = () => {{
+        const wrap = document.querySelector('.race-hero__canvas-wrap');
+        const arena = document.querySelector('.race-arena');
+        const podLayer = document.querySelector('.race-arena__pods');
+        const gapLine = document.querySelector('.race-gap-line');
+        const burst = document.querySelector('.race-touch-burst');
+        if (!wrap || !arena) return;
+
+        const pods = () => Array.from(arena.querySelectorAll('.track-pod[data-racer-id]'));
+        const userPod = () => arena.querySelector('.track-pod.is-user[data-racer-id]');
+        const racerOrder = () => pods()
+          .slice()
+          .sort((a, b) => (Number(a.dataset.rank || 99) - Number(b.dataset.rank || 99)))
+          .map((pod) => pod.dataset.racerId || '')
+          .filter(Boolean);
+
+        const setTilt = (clientX, clientY) => {{
+          const rect = arena.getBoundingClientRect();
+          const x = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(rect.width, 1)));
+          const y = Math.max(0, Math.min(1, (clientY - rect.top) / Math.max(rect.height, 1)));
+          touchState.touchX = x;
+          touchState.touchY = y;
+          const tiltX = (0.5 - y) * 9;
+          const tiltY = (x - 0.5) * 12;
+          arena.style.setProperty('--touch-x', `${{(x * 100).toFixed(1)}}%`);
+          arena.style.setProperty('--touch-y', `${{(y * 100).toFixed(1)}}%`);
+          arena.style.setProperty('--tilt-x', `${{tiltX.toFixed(2)}}deg`);
+          arena.style.setProperty('--tilt-y', `${{tiltY.toFixed(2)}}deg`);
+          const shiftX = (x - 0.5) * 18;
+          const shiftY = (y - 0.5) * 14;
+          arena.style.setProperty('--grid-shift-x', `${{(shiftX * -0.55).toFixed(1)}}px`);
+          arena.style.setProperty('--grid-shift-y', `${{(shiftY * -0.4).toFixed(1)}}px`);
+          arena.style.setProperty('--track-shift-x', `${{(shiftX * 0.35).toFixed(1)}}px`);
+          arena.style.setProperty('--track-shift-y', `${{(shiftY * 0.28).toFixed(1)}}px`);
+          arena.style.setProperty('--inner-shift-x', `${{(shiftX * 0.6).toFixed(1)}}px`);
+          arena.style.setProperty('--inner-shift-y', `${{(shiftY * 0.48).toFixed(1)}}px`);
+          arena.style.setProperty('--pod-shift-x', `${{(shiftX * 0.85).toFixed(1)}}px`);
+          arena.style.setProperty('--pod-shift-y', `${{(shiftY * 0.7).toFixed(1)}}px`);
+          arena.classList.add('race-arena--touched');
+        }};
+
+        const clearActivePods = () => {{
+          pods().forEach((pod) => {{
+            pod.classList.remove('race-pod--you-active', 'race-pod--rival-active', 'race-pod--focused');
+          }});
+        }};
+
+        const showBurst = (text, target) => {{
+          if (!burst || !target) return;
+          const arenaRect = arena.getBoundingClientRect();
+          const rect = target.getBoundingClientRect();
+          burst.textContent = text;
+          burst.style.left = `${{rect.left + rect.width / 2 - arenaRect.left}}px`;
+          burst.style.top = `${{rect.top + rect.height / 2 - arenaRect.top}}px`;
+          burst.classList.remove('is-visible');
+          void burst.offsetWidth;
+          burst.classList.add('is-visible');
+          window.setTimeout(() => burst.classList.remove('is-visible'), 900);
+        }};
+
+        const drawGap = (target) => {{
+          const you = userPod();
+          if (!gapLine || !you || !target || target === you) {{
+            if (gapLine) gapLine.classList.remove('is-visible');
+            return;
+          }}
+          const arenaRect = arena.getBoundingClientRect();
+          const from = you.getBoundingClientRect();
+          const to = target.getBoundingClientRect();
+          const x1 = from.left + from.width / 2 - arenaRect.left;
+          const y1 = from.top + from.height / 2 - arenaRect.top;
+          const x2 = to.left + to.width / 2 - arenaRect.left;
+          const y2 = to.top + to.height / 2 - arenaRect.top;
+          const length = Math.hypot(x2 - x1, y2 - y1);
+          const angle = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
+          gapLine.style.width = `${{length.toFixed(1)}}px`;
+          gapLine.style.transform = `translate3d(${{x1.toFixed(1)}}px, ${{y1.toFixed(1)}}px, 0) rotate(${{angle.toFixed(1)}}deg)`;
+          gapLine.classList.add('is-visible');
+        }};
+
+        const gapTextFor = (target) => {{
+          const you = userPod();
+          const userScore = Number(you?.dataset.score || state.score || 0);
+          const targetScore = Number(target?.dataset.score || 0);
+          if (!Number.isFinite(userScore) || !Number.isFinite(targetScore) || !target) return 'Gap n/a';
+          const gap = targetScore - userScore;
+          return gap === 0 ? 'Tied' : `Gap ${{Math.abs(gap)}}`;
+        }};
+
+        const focusRacer = (id, reason) => {{
+          if (!id) return;
+          const target = pods().find((pod) => pod.dataset.racerId === id);
+          if (!target) return;
+          clearActivePods();
+          touchState.focusedRacer = id;
+          arena.dataset.focusedRacer = id;
+          arena.classList.add('race-arena--focus');
+          target.classList.add('race-pod--focused');
+          if (target.classList.contains('is-user')) {{
+            target.classList.add('race-pod--you-active');
+            showBurst('YOU', target);
+            setCallout('YOU', true);
+            if (reason === 'tap' && navigator.vibrate) navigator.vibrate(20);
+            drawGap(null);
+          }} else {{
+            target.classList.add('race-pod--rival-active');
+            touchState.selectedRival = id;
+            const text = gapTextFor(target);
+            showBurst(text, target);
+            setCallout(text, true);
+            drawGap(target);
+          }}
+          target.scrollIntoView({{ block: 'nearest', inline: 'nearest', behavior: 'smooth' }});
+          window.setTimeout(() => arena.classList.remove('race-arena--focus'), 2600);
+        }};
+
+        const cycleFocus = (direction) => {{
+          const order = racerOrder();
+          if (!order.length) return;
+          const current = order.indexOf(touchState.focusedRacer);
+          const nextIndex = current < 0 ? 0 : (current + direction + order.length) % order.length;
+          focusRacer(order[nextIndex], 'swipe');
+        }};
+
+        const resetView = () => {{
+          touchState.focusedRacer = '';
+          touchState.selectedRival = '';
+          touchState.isDragging = false;
+          arena.classList.remove('race-arena--touched', 'race-arena--focus', 'race-pod--slowmo');
+          arena.style.removeProperty('--tilt-x');
+          arena.style.removeProperty('--tilt-y');
+          arena.style.removeProperty('--grid-shift-x');
+          arena.style.removeProperty('--grid-shift-y');
+          arena.style.removeProperty('--track-shift-x');
+          arena.style.removeProperty('--track-shift-y');
+          arena.style.removeProperty('--inner-shift-x');
+          arena.style.removeProperty('--inner-shift-y');
+          arena.style.removeProperty('--pod-shift-x');
+          arena.style.removeProperty('--pod-shift-y');
+          clearActivePods();
+          if (gapLine) gapLine.classList.remove('is-visible');
+          setCallout(state.callout || 'race live', false);
+        }};
+
+        const longPress = () => {{
+          touchState.isLongPress = true;
+          arena.classList.add('race-pod--slowmo');
+          showBurst('SLOW', userPod() || arena);
+          window.setTimeout(() => {{
+            touchState.isLongPress = false;
+            arena.classList.remove('race-pod--slowmo');
+          }}, 2600);
+        }};
+
+        arena.addEventListener('pointerdown', (event) => {{
+          if (event.pointerType === 'mouse' && event.button !== 0) return;
+          touchState.isDragging = true;
+          touchState.startX = event.clientX;
+          touchState.startY = event.clientY;
+          setTilt(event.clientX, event.clientY);
+          try {{
+            arena.setPointerCapture?.(event.pointerId);
+          }} catch (error) {{}}
+          window.clearTimeout(touchState.longPressTimer);
+          touchState.longPressTimer = window.setTimeout(longPress, 620);
+        }}, {{ passive: true }});
+
+        arena.addEventListener('pointermove', (event) => {{
+          if (!touchState.isDragging) return;
+          setTilt(event.clientX, event.clientY);
+        }}, {{ passive: true }});
+
+        arena.addEventListener('pointerup', (event) => {{
+          window.clearTimeout(touchState.longPressTimer);
+          const dx = event.clientX - touchState.startX;
+          const dy = event.clientY - touchState.startY;
+          const now = performance.now();
+          const tappedPod = event.target.closest?.('.track-pod[data-racer-id]');
+          if (Math.abs(dx) > 54 && Math.abs(dx) > Math.abs(dy) * 1.35) {{
+            event.preventDefault();
+            cycleFocus(dx > 0 ? 1 : -1);
+          }} else if (tappedPod && Math.hypot(dx, dy) < 14 && !touchState.isLongPress) {{
+            event.preventDefault();
+            focusRacer(tappedPod.dataset.racerId || '', 'tap');
+          }} else if (now - touchState.lastTapTime < 320) {{
+            event.preventDefault();
+            resetView();
+          }}
+          touchState.lastTapTime = now;
+          touchState.isDragging = false;
+          window.setTimeout(() => arena.classList.remove('race-arena--touched'), 1200);
+        }});
+
+        arena.addEventListener('pointercancel', () => {{
+          window.clearTimeout(touchState.longPressTimer);
+          touchState.isDragging = false;
+          window.setTimeout(() => arena.classList.remove('race-arena--touched'), 400);
+        }}, {{ passive: true }});
+
+        if (podLayer) podLayer.setAttribute('aria-label', 'Touch-reactive race pods');
+      }};
+
       const renderFallback = () => {{
         if (!canvasHost) return;
         canvasHost.classList.add('is-fallback');
-        if (canvasHost.querySelector('.race-arena')) return;
+        if (canvasHost.querySelector('.race-arena')) {{
+          initRaceTouchInteractions();
+          return;
+        }}
         canvasHost.innerHTML = `
           <div class="race-arena">
             <div class="race-arena__grid"></div>
             <div class="race-arena__track"></div>
             <div class="race-arena__inner"></div>
             <div class="race-arena__pods">
-              <div class="track-pod is-user" style="--pod-index:0;"><span class="track-pod__badge">#4</span><span class="track-pod__body"></span><span class="track-pod__label">YOU</span><span class="track-pod__score">live</span></div>
-              <div class="track-pod is-bot" style="--pod-index:1;"><span class="track-pod__badge">#3</span><span class="track-pod__body"></span><span class="track-pod__label">bot_2</span><span class="track-pod__score">target</span></div>
-              <div class="track-pod" style="--pod-index:2;"><span class="track-pod__badge">#2</span><span class="track-pod__body"></span><span class="track-pod__label">rival</span><span class="track-pod__score">ahead</span></div>
-              <div class="track-pod is-bot" style="--pod-index:3;"><span class="track-pod__badge">#5</span><span class="track-pod__body"></span><span class="track-pod__label">bot_1</span><span class="track-pod__score">behind</span></div>
-              <div class="track-pod" style="--pod-index:4;"><span class="track-pod__badge">#1</span><span class="track-pod__body"></span><span class="track-pod__label">leader</span><span class="track-pod__score">lead</span></div>
+              <div class="track-pod is-user" data-racer-visual="true" data-racer-id="letlhogonolo_fanampe" data-agent="letlhogonolo_fanampe" data-rank="4" data-score="0" style="--pod-index:0; --pod-x:44%; --pod-y:58%;"><span class="track-pod__badge">#4</span><span class="track-pod__body"></span><span class="track-pod__label">YOU</span><span class="track-pod__score">live</span></div>
+              <div class="track-pod is-bot is-target" data-racer-visual="true" data-racer-id="house_bot_2" data-agent="house_bot_2" data-rank="3" data-score="0" style="--pod-index:1; --pod-x:62%; --pod-y:56%;"><span class="track-pod__badge">#3</span><span class="track-pod__body"></span><span class="track-pod__label">bot_2</span><span class="track-pod__score">target</span></div>
+              <div class="track-pod is-rival" data-racer-visual="true" data-racer-id="rival_2" data-agent="rival_2" data-rank="2" data-score="0" style="--pod-index:2; --pod-x:51%; --pod-y:34%;"><span class="track-pod__badge">#2</span><span class="track-pod__body"></span><span class="track-pod__label">rival</span><span class="track-pod__score">ahead</span></div>
+              <div class="track-pod is-bot is-chaser" data-racer-visual="true" data-racer-id="house_bot_1" data-agent="house_bot_1" data-rank="5" data-score="0" style="--pod-index:3; --pod-x:80%; --pod-y:32%;"><span class="track-pod__badge">#5</span><span class="track-pod__body"></span><span class="track-pod__label">bot_1</span><span class="track-pod__score">behind</span></div>
+              <div class="track-pod is-leader" data-racer-visual="true" data-racer-id="leader" data-agent="leader" data-rank="1" data-score="0" style="--pod-index:4; --pod-x:70%; --pod-y:74%;"><span class="track-pod__badge">#1</span><span class="track-pod__body"></span><span class="track-pod__label">leader</span><span class="track-pod__score">lead</span></div>
             </div>
+            <div class="race-gap-line" aria-hidden="true"></div>
+            <div class="race-touch-burst" aria-hidden="true"></div>
           </div>`;
+        initRaceTouchInteractions();
       }};
 
       const syncList = (next) => {{
@@ -640,6 +865,7 @@ def _dashboard_script(race: Dict[str, Any]) -> str:
       }}
 
       try {{
+        initRaceTouchInteractions();
         const THREE = await import('https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js');
         const width = canvasHost ? canvasHost.clientWidth : window.innerWidth;
         const height = canvasHost ? canvasHost.clientHeight : Math.max(320, window.innerHeight * 0.45);
@@ -653,9 +879,13 @@ def _dashboard_script(race: Dict[str, Any]) -> str:
         renderer.domElement.style.width = '100%';
         renderer.domElement.style.height = '100%';
         renderer.domElement.style.display = 'block';
+        renderer.domElement.style.position = 'absolute';
+        renderer.domElement.style.inset = '0';
+        renderer.domElement.style.zIndex = '0';
+        renderer.domElement.style.pointerEvents = 'none';
         if (canvasHost) {{
-          canvasHost.innerHTML = '';
-          canvasHost.appendChild(renderer.domElement);
+          canvasHost.classList.add('has-webgl');
+          canvasHost.prepend(renderer.domElement);
         }}
 
         const ambient = new THREE.AmbientLight(0x8bb8ff, 1.2);
@@ -1117,9 +1347,47 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       position: absolute;
       inset: 0;
       overflow: hidden;
+      touch-action: pan-y;
+      --tilt-x: 0deg;
+      --tilt-y: 0deg;
+      --grid-shift-x: 0px;
+      --grid-shift-y: 0px;
+      --track-shift-x: 0px;
+      --track-shift-y: 0px;
+      --inner-shift-x: 0px;
+      --inner-shift-y: 0px;
+      --pod-shift-x: 0px;
+      --pod-shift-y: 0px;
+      transform: perspective(880px) rotateX(var(--tilt-x)) rotateY(var(--tilt-y));
+      transform-style: preserve-3d;
+      transition: transform 220ms ease, filter 220ms ease;
       background:
         radial-gradient(circle at 52% 56%, rgba(125,255,178,0.2), transparent 24%),
         radial-gradient(circle at 50% 55%, rgba(102,217,255,0.18), transparent 46%);
+    }}
+    .race-arena::after {{
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      pointer-events: none;
+      opacity: 0;
+      background: radial-gradient(circle at var(--touch-x, 50%) var(--touch-y, 50%), rgba(125,255,178,0.22), transparent 24%);
+      transition: opacity 180ms ease;
+    }}
+    .race-arena--touched::after {{
+      opacity: 1;
+    }}
+    .race-arena--focus {{
+      filter: brightness(1.12) saturate(1.14);
+    }}
+    .race-arena.race-pod--slowmo .race-arena__track,
+    .race-arena.race-pod--slowmo .race-arena__inner,
+    .race-arena.race-pod--slowmo .race-arena__grid,
+    .race-arena.race-pod--slowmo .track-pod,
+    .race-arena.race-pod--slowmo .track-pod::after {{
+      animation-duration: 6s !important;
+      filter: brightness(1.28);
     }}
     .race-arena__grid {{
       position: absolute;
@@ -1132,6 +1400,10 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       transform-origin: 50% 80%;
       animation: gridDrift 7s linear infinite;
       opacity: 0.7;
+      transition: transform 160ms ease;
+    }}
+    .race-arena--touched .race-arena__grid {{
+      transform: perspective(520px) rotateX(63deg) translate3d(var(--grid-shift-x), calc(70px + var(--grid-shift-y)), -18px);
     }}
     .race-arena__track {{
       position: absolute;
@@ -1149,6 +1421,10 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
         inset 0 0 70px rgba(102,217,255,0.12),
         0 0 110px rgba(102,217,255,0.34);
       animation: trackPulse 3.2s ease-in-out infinite;
+      transition: transform 170ms ease, box-shadow 170ms ease;
+    }}
+    .race-arena--touched .race-arena__track {{
+      transform: translate(calc(-50% + var(--track-shift-x)), calc(-50% + var(--track-shift-y)));
     }}
     .race-arena__inner {{
       position: absolute;
@@ -1162,6 +1438,10 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       border-radius: 50%;
       box-shadow: inset 0 0 36px rgba(125,255,178,0.08);
       animation: lanePulse 2.4s ease-in-out infinite;
+      transition: transform 170ms ease;
+    }}
+    .race-arena--touched .race-arena__inner {{
+      transform: translate(calc(-50% + var(--inner-shift-x)), calc(-50% + var(--inner-shift-y)));
     }}
     .race-arena__track::before,
     .race-arena__track::after {{
@@ -1183,6 +1463,8 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       position: absolute;
       inset: 0;
       z-index: 3;
+      transform: translate3d(var(--pod-shift-x), var(--pod-shift-y), 42px);
+      transition: transform 150ms ease;
     }}
     .track-pod {{
       position: absolute;
@@ -1203,6 +1485,11 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       animation-delay: calc(var(--pod-index) * -0.25s);
       transform-origin: center;
       transform: translate(-50%, -50%);
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+      cursor: pointer;
+      transition: box-shadow 160ms ease, border-color 160ms ease, filter 160ms ease, transform 160ms ease;
     }}
     .track-pod::after {{
       content: "";
@@ -1245,6 +1532,57 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     }}
     .track-pod.is-chaser {{
       opacity: 0.92;
+    }}
+    .track-pod.race-pod--focused {{
+      border-color: rgba(255,255,255,0.94);
+      filter: brightness(1.22);
+      box-shadow: 0 0 0 4px rgba(255,255,255,0.18), 0 0 78px rgba(102,217,255,0.7), 0 18px 44px rgba(0,0,0,0.32);
+      z-index: 8;
+    }}
+    .track-pod.race-pod--you-active {{
+      border-color: rgba(125,255,178,1);
+      animation: podHover 0.72s ease-in-out infinite, youTouchPulse 0.9s ease-out 1;
+    }}
+    .track-pod.race-pod--rival-active {{
+      border-color: rgba(255,209,102,0.94);
+      box-shadow: 0 0 0 4px rgba(255,209,102,0.16), 0 0 68px rgba(255,209,102,0.52), 0 16px 42px rgba(0,0,0,0.3);
+    }}
+    .race-gap-line {{
+      position: absolute;
+      left: 0;
+      top: 0;
+      z-index: 4;
+      height: 3px;
+      width: 0;
+      transform-origin: 0 50%;
+      pointer-events: none;
+      opacity: 0;
+      border-radius: 999px;
+      background: linear-gradient(90deg, rgba(125,255,178,0.98), rgba(255,209,102,0.95));
+      box-shadow: 0 0 18px rgba(255,209,102,0.72);
+      transition: opacity 140ms ease;
+    }}
+    .race-gap-line.is-visible {{
+      opacity: 1;
+    }}
+    .race-touch-burst {{
+      position: absolute;
+      z-index: 9;
+      transform: translate(-50%, -50%) scale(0.7);
+      pointer-events: none;
+      opacity: 0;
+      padding: 7px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(125,255,178,0.62);
+      background: rgba(5, 14, 24, 0.84);
+      color: #dfffe9;
+      font-size: 12px;
+      font-weight: 950;
+      text-transform: uppercase;
+      box-shadow: 0 0 34px rgba(125,255,178,0.45);
+    }}
+    .race-touch-burst.is-visible {{
+      animation: touchBurst 0.88s ease-out 1;
     }}
     .track-pod__body {{
       width: 28px;
@@ -1644,6 +1982,16 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       0%, 100% {{ opacity: 0.55; transform: translateY(-50%) scaleX(0.72); }}
       45% {{ opacity: 1; transform: translateY(-50%) scaleX(1.18); }}
       70% {{ opacity: 0.78; transform: translateY(-50%) scaleX(0.9); }}
+    }}
+    @keyframes touchBurst {{
+      0% {{ opacity: 0; transform: translate(-50%, -50%) scale(0.62); }}
+      20% {{ opacity: 1; transform: translate(-50%, -78%) scale(1); }}
+      100% {{ opacity: 0; transform: translate(-50%, -118%) scale(1.18); }}
+    }}
+    @keyframes youTouchPulse {{
+      0% {{ transform: translate(-50%, -50%) scale(1); }}
+      45% {{ transform: translate(-50%, -50%) scale(1.12); }}
+      100% {{ transform: translate(-50%, -50%) scale(1); }}
     }}
     .hero-main {{
       padding: 24px;

@@ -23,8 +23,17 @@ def test_dashboard_requires_token_and_serves_protected_api():
     assert "race-hero__details" in root.text
     assert "race-canvas" in root.text
     assert "race-arena" in root.text
+    assert "race-arena--touched" in root.text
+    assert "race-arena--focus" in root.text
     assert "track-pod" in root.text
     assert "data-racer-visual" in root.text
+    assert "data-racer-id" in root.text
+    assert "race-pod--you-active" in root.text
+    assert "race-pod--rival-active" in root.text
+    assert "race-pod--slowmo" in root.text
+    assert "race-gap-line" in root.text
+    assert "race-touch-burst" in root.text
+    assert "navigator.vibrate" in root.text
     assert "race-state-banner" in root.text
     assert "race-ticker" in root.text
     assert "Next target" in root.text

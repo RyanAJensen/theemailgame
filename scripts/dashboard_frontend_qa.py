@@ -63,6 +63,13 @@ class ViewportResult:
     our_racer_above_fold: bool = False
     race_numbers_above_fold: bool = False
     unreadable_text: bool = False
+    touch_reactive: bool = False
+    you_tap_reaction: bool = False
+    rival_tap_reaction: bool = False
+    swipe_focus_reaction: bool = False
+    long_press_slowmo: bool = False
+    double_tap_reset: bool = False
+    overflow_after_interactions: bool = False
 
 
 @dataclass
@@ -180,6 +187,7 @@ async def _qa_viewport(
     await page.goto(url, wait_until="networkidle", timeout=30000)
     loaded_ms = int((time.monotonic() - started) * 1000)
     await page.wait_for_timeout(1200)
+    touch_metrics = await _interaction_metrics(page)
     screenshot_path = SCREENSHOT_DIR / filename
     await page.screenshot(path=str(screenshot_path), full_page=False)
 
@@ -314,6 +322,99 @@ async def _qa_viewport(
         our_racer_above_fold=bool(metrics.get("ourRacerAboveFold")),
         race_numbers_above_fold=bool(metrics.get("raceNumbersAboveFold")),
         unreadable_text=bool(metrics.get("unreadableText")),
+        touch_reactive=bool(touch_metrics.get("touchReactive")),
+        you_tap_reaction=bool(touch_metrics.get("youTapReaction")),
+        rival_tap_reaction=bool(touch_metrics.get("rivalTapReaction")),
+        swipe_focus_reaction=bool(touch_metrics.get("swipeFocusReaction")),
+        long_press_slowmo=bool(touch_metrics.get("longPressSlowmo")),
+        double_tap_reset=bool(touch_metrics.get("doubleTapReset")),
+        overflow_after_interactions=bool(touch_metrics.get("overflowAfterInteractions")),
+    )
+
+
+async def _interaction_metrics(page: Any) -> Dict[str, Any]:
+    return await page.evaluate(
+        """async () => {
+          const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+          const arena = document.querySelector('.race-arena');
+          const you = document.querySelector('.track-pod.is-user[data-racer-id]');
+          const rival = document.querySelector('.track-pod:not(.is-user)[data-racer-id]');
+          const gapLine = document.querySelector('.race-gap-line');
+          if (!arena || !you || !rival || typeof PointerEvent === 'undefined') {
+            return {
+              touchReactive: false,
+              youTapReaction: false,
+              rivalTapReaction: false,
+              swipeFocusReaction: false,
+              longPressSlowmo: false,
+              doubleTapReset: false,
+              overflowAfterInteractions: document.documentElement.scrollWidth > window.innerWidth + 2,
+            };
+          }
+          const center = (el) => {
+            const rect = el.getBoundingClientRect();
+            return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+          };
+          const fire = (target, type, point) => {
+            target.dispatchEvent(new PointerEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              clientX: point.x,
+              clientY: point.y,
+              pointerId: 41,
+              pointerType: 'touch',
+              isPrimary: true,
+            }));
+          };
+          const tap = async (target) => {
+            const point = center(target);
+            fire(target, 'pointerdown', point);
+            await wait(40);
+            fire(target, 'pointerup', point);
+            await wait(140);
+          };
+          const arenaRect = arena.getBoundingClientRect();
+          const left = {x: arenaRect.left + arenaRect.width * 0.24, y: arenaRect.top + arenaRect.height * 0.5};
+          const right = {x: arenaRect.left + arenaRect.width * 0.76, y: arenaRect.top + arenaRect.height * 0.5};
+
+          fire(arena, 'pointerdown', left);
+          await wait(45);
+          fire(arena, 'pointermove', right);
+          const touchReactive = arena.classList.contains('race-arena--touched') && Boolean(arena.style.getPropertyValue('--tilt-y'));
+          fire(arena, 'pointerup', right);
+          await wait(140);
+          const swipeFocusReaction = Boolean(arena.dataset.focusedRacer || document.querySelector('.track-pod.race-pod--focused'));
+
+          await tap(you);
+          const youTapReaction = you.classList.contains('race-pod--you-active') && document.querySelector('.race-touch-burst.is-visible');
+
+          await tap(rival);
+          const rivalTapReaction = rival.classList.contains('race-pod--rival-active') && Boolean(gapLine && gapLine.classList.contains('is-visible'));
+
+          const slowPoint = center(arena);
+          fire(arena, 'pointerdown', slowPoint);
+          await wait(720);
+          const longPressSlowmo = arena.classList.contains('race-pod--slowmo');
+          fire(arena, 'pointerup', slowPoint);
+          await wait(120);
+
+          fire(arena, 'pointerdown', slowPoint);
+          fire(arena, 'pointerup', slowPoint);
+          await wait(90);
+          fire(arena, 'pointerdown', slowPoint);
+          fire(arena, 'pointerup', slowPoint);
+          await wait(180);
+          const doubleTapReset = !document.querySelector('.track-pod.race-pod--focused, .track-pod.race-pod--you-active, .track-pod.race-pod--rival-active') && !(gapLine && gapLine.classList.contains('is-visible'));
+          return {
+            touchReactive,
+            youTapReaction: Boolean(youTapReaction),
+            rivalTapReaction,
+            swipeFocusReaction,
+            longPressSlowmo,
+            doubleTapReset,
+            overflowAfterInteractions: document.documentElement.scrollWidth > window.innerWidth + 2,
+          };
+        }"""
     )
 
 
@@ -373,6 +474,27 @@ def _score(result: QAResult) -> None:
     if any(v.table_overflow for v in all_viewports):
         score -= 5
         issues.append("table overflow")
+    if any(not v.touch_reactive for v in all_viewports):
+        score -= 20
+        issues.append("touch drag reaction missing")
+    if any(not v.you_tap_reaction for v in all_viewports):
+        score -= 15
+        issues.append("YOU pod tap reaction missing")
+    if any(not v.rival_tap_reaction for v in all_viewports):
+        score -= 15
+        issues.append("rival pod tap reaction missing")
+    if any(not v.swipe_focus_reaction for v in all_viewports):
+        score -= 10
+        issues.append("swipe focus reaction missing")
+    if any(not v.long_press_slowmo for v in all_viewports):
+        score -= 10
+        issues.append("long press slow-motion missing")
+    if any(not v.double_tap_reset for v in all_viewports):
+        score -= 10
+        issues.append("double tap reset missing")
+    if any(v.overflow_after_interactions for v in all_viewports):
+        score -= 15
+        issues.append("interaction caused horizontal overflow")
 
     result.score = max(0, score)
     if result.score >= 90:
@@ -398,6 +520,12 @@ def _recommendation(issues: List[str]) -> str:
         return "Move large text cards below the arena and keep only compact chips over the race visual."
     if "not enough visible racer pods" in issues:
         return "Render at least three competitor pod visuals above the fold."
+    if "touch drag reaction missing" in issues:
+        return "Wire Android pointer movement to arena tilt/parallax state."
+    if "YOU pod tap reaction missing" in issues or "rival pod tap reaction missing" in issues:
+        return "Make pod tap targets update visible active/focus classes and compact chips."
+    if "swipe focus reaction missing" in issues:
+        return "Handle horizontal swipes inside the race arena without navigating the page."
     if "tap targets under 44px" in issues:
         return "Increase interactive target sizing to at least 44px."
     return f"Address {issues[0]} before further visual polish."
@@ -451,10 +579,18 @@ def _finding_lines(result: QAResult) -> List[str]:
     overflow = [v.name for v in result.viewports if v.horizontal_overflow]
     tiny = sum(v.tiny_tap_targets for v in result.viewports)
     slow = [f"{v.name}: {v.loaded_ms}ms" for v in result.viewports if (v.loaded_ms or 0) > 3000]
+    touch_ready = all(v.touch_reactive for v in result.viewports)
+    you_ready = all(v.you_tap_reaction for v in result.viewports)
+    rival_ready = all(v.rival_tap_reaction for v in result.viewports)
+    swipe_ready = all(v.swipe_focus_reaction for v in result.viewports)
+    long_ready = all(v.long_press_slowmo for v in result.viewports)
+    reset_ready = all(v.double_tap_reset for v in result.viewports)
+    overflow_after = any(v.overflow_after_interactions for v in result.viewports)
     return [
         f"- Hero: heights {hero_heights}; race numbers above fold: {all(v.race_numbers_above_fold for v in result.viewports)}.",
         f"- Visual-first hero: arena exists: {all(v.race_arena_exists for v in result.viewports)}; arena height >= 320px: {all(v.visual_arena_height >= 320 for v in result.viewports)}; overlay coverage <= 35%: {all(v.visual_overlay_coverage <= 0.35 for v in result.viewports)}.",
         f"- Race visualization: our racer above fold: {all(v.our_racer_above_fold for v in result.viewports)}; visible racer pods: {min((v.visible_racer_count for v in result.viewports), default=0)}; no card over YOU pod: {not any(v.card_overlaps_you_pod for v in result.viewports)}; reduced motion useful: {result.reduced_motion_useful}.",
+        f"- Touch reactive: drag/parallax {touch_ready}; YOU tap {you_ready}; rival tap {rival_ready}; swipe focus {swipe_ready}; long press slow-motion {long_ready}; double tap reset {reset_ready}; overflow after interactions {overflow_after}.",
         f"- Mobile layout: {'horizontal overflow in ' + ', '.join(overflow) if overflow else 'no horizontal overflow detected'}.",
         f"- Readability: {'unreadable small text detected' if any(v.unreadable_text for v in result.viewports) else 'no tiny readable-text issue detected'}.",
         f"- Overflow: table overflow: {any(v.table_overflow for v in result.viewports)}; wide elements: {sum(len(v.wide_elements) for v in result.viewports)}.",
@@ -523,9 +659,22 @@ def _summary_payload(result: QAResult) -> Dict[str, Any]:
                 "our_racer_above_fold": item.our_racer_above_fold,
                 "race_numbers_above_fold": item.race_numbers_above_fold,
                 "unreadable_text": item.unreadable_text,
+                "touch_reactive": item.touch_reactive,
+                "you_tap_reaction": item.you_tap_reaction,
+                "rival_tap_reaction": item.rival_tap_reaction,
+                "swipe_focus_reaction": item.swipe_focus_reaction,
+                "long_press_slowmo": item.long_press_slowmo,
+                "double_tap_reset": item.double_tap_reset,
+                "overflow_after_interactions": item.overflow_after_interactions,
             }
             for item in result.viewports
         ],
+        "touch_reactive": all(item.touch_reactive for item in result.viewports) if result.viewports else False,
+        "you_pod_tap_reaction": all(item.you_tap_reaction for item in result.viewports) if result.viewports else False,
+        "rival_tap_reaction": all(item.rival_tap_reaction for item in result.viewports) if result.viewports else False,
+        "swipe_focus_reaction": all(item.swipe_focus_reaction for item in result.viewports) if result.viewports else False,
+        "long_press_slowmo": all(item.long_press_slowmo for item in result.viewports) if result.viewports else False,
+        "double_tap_reset": all(item.double_tap_reset for item in result.viewports) if result.viewports else False,
     }
 
 

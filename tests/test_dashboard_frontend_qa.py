@@ -35,6 +35,12 @@ def test_summary_payload_contains_viewport_checks():
             need_chip_visible=True,
             our_racer_above_fold=True,
             race_numbers_above_fold=True,
+            touch_reactive=True,
+            you_tap_reaction=True,
+            rival_tap_reaction=True,
+            swipe_focus_reaction=True,
+            long_press_slowmo=True,
+            double_tap_reset=True,
         )
     )
 
@@ -49,6 +55,18 @@ def test_summary_payload_contains_viewport_checks():
     assert payload["viewports"][0]["need_chip_visible"] is True
     assert payload["viewports"][0]["our_racer_above_fold"] is True
     assert payload["viewports"][0]["race_numbers_above_fold"] is True
+    assert payload["viewports"][0]["touch_reactive"] is True
+    assert payload["viewports"][0]["you_tap_reaction"] is True
+    assert payload["viewports"][0]["rival_tap_reaction"] is True
+    assert payload["viewports"][0]["swipe_focus_reaction"] is True
+    assert payload["viewports"][0]["long_press_slowmo"] is True
+    assert payload["viewports"][0]["double_tap_reset"] is True
+    assert payload["touch_reactive"] is True
+    assert payload["you_pod_tap_reaction"] is True
+    assert payload["rival_tap_reaction"] is True
+    assert payload["swipe_focus_reaction"] is True
+    assert payload["long_press_slowmo"] is True
+    assert payload["double_tap_reset"] is True
 
 
 def test_last_report_state_tracks_safe_fields(tmp_path, monkeypatch):
@@ -129,3 +147,33 @@ def test_visual_first_qa_checks_are_enforced():
 
     assert result.score < 90
     assert result.main_issue == "visual race arena too short"
+
+
+def test_touch_reactive_qa_checks_are_enforced():
+    result = qa.QAResult(browser_available=True)
+    result.viewports.append(
+        qa.ViewportResult(
+            name="home-412x915.png",
+            width=412,
+            height=915,
+            screenshot="dashboard_qa/screenshots/home-412x915.png",
+            race_arena_exists=True,
+            visual_arena_height=430,
+            visual_overlay_coverage=0.1,
+            visible_racer_count=5,
+            need_chip_visible=True,
+            our_racer_above_fold=True,
+            race_numbers_above_fold=True,
+            touch_reactive=False,
+            you_tap_reaction=False,
+            rival_tap_reaction=False,
+            swipe_focus_reaction=False,
+            long_press_slowmo=False,
+            double_tap_reset=False,
+        )
+    )
+
+    qa._score(result)
+
+    assert result.score < 90
+    assert "touch" in result.main_issue
