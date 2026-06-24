@@ -28,6 +28,11 @@ def test_summary_payload_contains_viewport_checks():
             width=412,
             height=915,
             screenshot="dashboard_qa/screenshots/home-412x915.png",
+            race_arena_exists=True,
+            visual_arena_height=430,
+            visual_overlay_coverage=0.1,
+            visible_racer_count=5,
+            need_chip_visible=True,
             our_racer_above_fold=True,
             race_numbers_above_fold=True,
         )
@@ -37,6 +42,11 @@ def test_summary_payload_contains_viewport_checks():
 
     assert payload["qa_score"] == 95
     assert payload["screenshots_captured"] is True
+    assert payload["viewports"][0]["race_arena_exists"] is True
+    assert payload["viewports"][0]["visual_arena_height"] == 430
+    assert payload["viewports"][0]["visual_overlay_coverage"] == 0.1
+    assert payload["viewports"][0]["visible_racer_count"] == 5
+    assert payload["viewports"][0]["need_chip_visible"] is True
     assert payload["viewports"][0]["our_racer_above_fold"] is True
     assert payload["viewports"][0]["race_numbers_above_fold"] is True
 
@@ -94,3 +104,28 @@ def test_clipped_detector_ignores_below_fold_content():
     assert "verticallyVisible = rect.bottom > 0 && rect.top < viewportHeight" in source
     assert "horizontallyClipped && verticallyVisible" in source
     assert "rect.bottom < 0 || rect.top > viewportHeight" not in source
+
+
+def test_visual_first_qa_checks_are_enforced():
+    result = qa.QAResult(browser_available=True)
+    result.viewports.append(
+        qa.ViewportResult(
+            name="home-412x915.png",
+            width=412,
+            height=915,
+            screenshot="dashboard_qa/screenshots/home-412x915.png",
+            race_arena_exists=True,
+            visual_arena_height=300,
+            visual_overlay_coverage=0.5,
+            card_overlaps_you_pod=True,
+            visible_racer_count=2,
+            need_chip_visible=False,
+            our_racer_above_fold=True,
+            race_numbers_above_fold=True,
+        )
+    )
+
+    qa._score(result)
+
+    assert result.score < 90
+    assert result.main_issue == "visual race arena too short"

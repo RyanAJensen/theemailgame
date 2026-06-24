@@ -17,9 +17,14 @@ def test_dashboard_requires_token_and_serves_protected_api():
     assert root.status_code == 200
     assert "Open Race Control Dashboard" not in root.text
     assert "Live Email Pod Race" in root.text
+    assert "race-hero__title-strip" in root.text
+    assert "race-chipbar" in root.text
+    assert "race-chip is-hot" in root.text
+    assert "race-hero__details" in root.text
     assert "race-canvas" in root.text
     assert "race-arena" in root.text
     assert "track-pod" in root.text
+    assert "data-racer-visual" in root.text
     assert "race-state-banner" in root.text
     assert "race-ticker" in root.text
     assert "Next target" in root.text

@@ -54,6 +54,12 @@ class ViewportResult:
     tiny_tap_targets: int = 0
     duplicate_open_card: bool = False
     hero_height: int = 0
+    race_arena_exists: bool = False
+    visual_arena_height: int = 0
+    visual_overlay_coverage: float = 0.0
+    card_overlaps_you_pod: bool = False
+    visible_racer_count: int = 0
+    need_chip_visible: bool = False
     our_racer_above_fold: bool = False
     race_numbers_above_fold: bool = False
     unreadable_text: bool = False
@@ -213,6 +219,35 @@ async def _qa_viewport(
           });
           const hero = document.querySelector('.race-hero__canvas-wrap');
           const heroRect = hero ? hero.getBoundingClientRect() : {height: 0};
+          const arena = document.querySelector('.race-arena');
+          const arenaRect = arena ? arena.getBoundingClientRect() : {left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0};
+          const area = (rect) => Math.max(0, rect.right - rect.left) * Math.max(0, rect.bottom - rect.top);
+          const intersection = (a, b) => ({
+            left: Math.max(a.left, b.left),
+            top: Math.max(a.top, b.top),
+            right: Math.min(a.right, b.right),
+            bottom: Math.min(a.bottom, b.bottom),
+          });
+          const overlaySelectors = '.race-state-banner, .race-story, .race-user-pill, .race-hero__strip, .panel';
+          const overlayArea = Array.from(document.querySelectorAll(overlaySelectors)).reduce((sum, el) => {
+            const rect = el.getBoundingClientRect();
+            if (rect.bottom <= 0 || rect.top >= viewportHeight) return sum;
+            return sum + area(intersection(rect, arenaRect));
+          }, 0);
+          const arenaArea = area(arenaRect);
+          const overlayCoverage = arenaArea > 0 ? overlayArea / arenaArea : 1;
+          const userPod = document.querySelector('.track-pod.is-user');
+          const userPodRect = userPod ? userPod.getBoundingClientRect() : null;
+          const userPodCenter = userPodRect ? {x: userPodRect.left + userPodRect.width / 2, y: userPodRect.top + userPodRect.height / 2} : null;
+          const cardOverlapsPod = Boolean(userPodCenter && Array.from(document.querySelectorAll(overlaySelectors)).some((el) => {
+            const rect = el.getBoundingClientRect();
+            const bigEnough = rect.width * rect.height > 5000;
+            return bigEnough && userPodCenter.x >= rect.left && userPodCenter.x <= rect.right && userPodCenter.y >= rect.top && userPodCenter.y <= rect.bottom;
+          }));
+          const visibleRacers = Array.from(document.querySelectorAll('[data-racer-visual="true"], .track-pod')).filter((el) => {
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < viewportHeight && rect.right > 0 && rect.left < viewportWidth;
+          }).length;
           const text = document.body.innerText || '';
           const aboveFoldText = Array.from(document.querySelectorAll('body *'))
             .filter((el) => {
@@ -223,6 +258,7 @@ async def _qa_viewport(
             .join('\\n');
           const duplicateOpen = (text.match(/Open Race Control Dashboard/g) || []).length > 1;
           const ourRacer = /YOU|letlhogonolo_fanampe/.test(aboveFoldText);
+          const needChip = /Need \\+\\d/.test(aboveFoldText);
           const numbers = /Rank\\s*#?\\d|Score\\s*\\d|Gap to #1|Need \\+\\d/.test(aboveFoldText);
           const unreadable = all.some((el) => {
             const rect = el.getBoundingClientRect();
@@ -239,6 +275,12 @@ async def _qa_viewport(
             tinyTapTargets: tinyTapTargets.length,
             duplicateOpenCard: duplicateOpen,
             heroHeight: Math.round(heroRect.height || 0),
+            raceArenaExists: Boolean(arena),
+            visualArenaHeight: Math.round(arenaRect.height || heroRect.height || 0),
+            visualOverlayCoverage: Number(overlayCoverage.toFixed(3)),
+            cardOverlapsYouPod: cardOverlapsPod,
+            visibleRacerCount: visibleRacers,
+            needChipVisible: needChip,
             ourRacerAboveFold: ourRacer,
             raceNumbersAboveFold: numbers,
             unreadableText: unreadable,
@@ -263,6 +305,12 @@ async def _qa_viewport(
         tiny_tap_targets=int(metrics.get("tinyTapTargets") or 0),
         duplicate_open_card=bool(metrics.get("duplicateOpenCard")),
         hero_height=int(metrics.get("heroHeight") or 0),
+        race_arena_exists=bool(metrics.get("raceArenaExists")),
+        visual_arena_height=int(metrics.get("visualArenaHeight") or 0),
+        visual_overlay_coverage=float(metrics.get("visualOverlayCoverage") or 0.0),
+        card_overlaps_you_pod=bool(metrics.get("cardOverlapsYouPod")),
+        visible_racer_count=int(metrics.get("visibleRacerCount") or 0),
+        need_chip_visible=bool(metrics.get("needChipVisible")),
         our_racer_above_fold=bool(metrics.get("ourRacerAboveFold")),
         race_numbers_above_fold=bool(metrics.get("raceNumbersAboveFold")),
         unreadable_text=bool(metrics.get("unreadableText")),
@@ -286,6 +334,24 @@ def _score(result: QAResult) -> None:
     if any(v.clipped_elements for v in all_viewports):
         score -= 15
         issues.append("clipped hero or cards")
+    if any(not v.race_arena_exists for v in all_viewports):
+        score -= 25
+        issues.append("race arena missing")
+    if any(v.visual_arena_height < 320 for v in all_viewports):
+        score -= 20
+        issues.append("visual race arena too short")
+    if any(v.visual_overlay_coverage > 0.35 for v in all_viewports):
+        score -= 20
+        issues.append("large overlays cover race arena")
+    if any(v.card_overlaps_you_pod for v in all_viewports):
+        score -= 20
+        issues.append("card overlaps YOU pod")
+    if any(v.visible_racer_count < 3 for v in all_viewports):
+        score -= 20
+        issues.append("not enough visible racer pods")
+    if any(not v.need_chip_visible for v in all_viewports):
+        score -= 10
+        issues.append("Need +1 chip missing")
     if any(not v.our_racer_above_fold for v in all_viewports):
         score -= 15
         issues.append("our racer not visible above the fold")
@@ -328,6 +394,10 @@ def _recommendation(issues: List[str]) -> str:
         return "Fix mobile overflow first; stack or scroll wide hero/table elements cleanly."
     if "our racer not visible above the fold" in issues:
         return "Move the YOU pod and rank/score story higher in the Android viewport."
+    if "large overlays cover race arena" in issues or "card overlaps YOU pod" in issues:
+        return "Move large text cards below the arena and keep only compact chips over the race visual."
+    if "not enough visible racer pods" in issues:
+        return "Render at least three competitor pod visuals above the fold."
     if "tap targets under 44px" in issues:
         return "Increase interactive target sizing to at least 44px."
     return f"Address {issues[0]} before further visual polish."
@@ -383,7 +453,8 @@ def _finding_lines(result: QAResult) -> List[str]:
     slow = [f"{v.name}: {v.loaded_ms}ms" for v in result.viewports if (v.loaded_ms or 0) > 3000]
     return [
         f"- Hero: heights {hero_heights}; race numbers above fold: {all(v.race_numbers_above_fold for v in result.viewports)}.",
-        f"- Race visualization: our racer above fold: {all(v.our_racer_above_fold for v in result.viewports)}; reduced motion useful: {result.reduced_motion_useful}.",
+        f"- Visual-first hero: arena exists: {all(v.race_arena_exists for v in result.viewports)}; arena height >= 320px: {all(v.visual_arena_height >= 320 for v in result.viewports)}; overlay coverage <= 35%: {all(v.visual_overlay_coverage <= 0.35 for v in result.viewports)}.",
+        f"- Race visualization: our racer above fold: {all(v.our_racer_above_fold for v in result.viewports)}; visible racer pods: {min((v.visible_racer_count for v in result.viewports), default=0)}; no card over YOU pod: {not any(v.card_overlaps_you_pod for v in result.viewports)}; reduced motion useful: {result.reduced_motion_useful}.",
         f"- Mobile layout: {'horizontal overflow in ' + ', '.join(overflow) if overflow else 'no horizontal overflow detected'}.",
         f"- Readability: {'unreadable small text detected' if any(v.unreadable_text for v in result.viewports) else 'no tiny readable-text issue detected'}.",
         f"- Overflow: table overflow: {any(v.table_overflow for v in result.viewports)}; wide elements: {sum(len(v.wide_elements) for v in result.viewports)}.",
@@ -443,6 +514,12 @@ def _summary_payload(result: QAResult) -> Dict[str, Any]:
                 "tiny_tap_targets": item.tiny_tap_targets,
                 "duplicate_open_card": item.duplicate_open_card,
                 "hero_height": item.hero_height,
+                "race_arena_exists": item.race_arena_exists,
+                "visual_arena_height": item.visual_arena_height,
+                "visual_overlay_coverage": item.visual_overlay_coverage,
+                "card_overlaps_you_pod": item.card_overlaps_you_pod,
+                "visible_racer_count": item.visible_racer_count,
+                "need_chip_visible": item.need_chip_visible,
                 "our_racer_above_fold": item.our_racer_above_fold,
                 "race_numbers_above_fold": item.race_numbers_above_fold,
                 "unreadable_text": item.unreadable_text,

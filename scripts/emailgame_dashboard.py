@@ -368,6 +368,14 @@ def _race_hero_html(race: Dict[str, Any]) -> str:
     story = race.get("story") if isinstance(race.get("story"), dict) else {}
     rows = []
     pod_rows = []
+    pod_slots = [
+        ("50%", "70%"),
+        ("50%", "28%"),
+        ("78%", "42%"),
+        ("24%", "54%"),
+        ("82%", "18%"),
+        ("20%", "78%"),
+    ]
     for item in top_competitors:
         if not isinstance(item, dict):
             continue
@@ -395,10 +403,22 @@ def _race_hero_html(race: Dict[str, Any]) -> str:
             pod_classes.append("is-user")
         elif is_bot:
             pod_classes.append("is-bot")
+        rank = item.get("rank")
+        if rank == 1:
+            pod_classes.append("is-leader")
+        elif rank == 2:
+            pod_classes.append("is-rival")
+        elif rank == 3:
+            pod_classes.append("is-target")
+        elif rank == 5:
+            pod_classes.append("is-chaser")
         short_name = "YOU" if item.get("is_user") else str(item.get("agent_id") or "rival").replace("house_bot_", "bot_")[:10]
+        slot_x, slot_y = pod_slots[len(pod_rows) % len(pod_slots)]
         pod_rows.append(
             "<div class='" + " ".join(pod_classes) + "' "
-            f"style='--pod-index:{len(pod_rows)}; --pod-score:{html_escape(str(score if score is not None else 0), quote=True)};'>"
+            "data-racer-visual='true' "
+            f"data-rank='{html_escape(str(rank or ''), quote=True)}' "
+            f"style='--pod-index:{len(pod_rows)}; --pod-x:{slot_x}; --pod-y:{slot_y}; --pod-score:{html_escape(str(score if score is not None else 0), quote=True)};'>"
             f"<span class='track-pod__badge'>#{html_escape(str(item.get('rank') or ''), quote=False)}</span>"
             "<span class='track-pod__body'></span>"
             f"<span class='track-pod__label'>{html_escape(short_name, quote=False)}</span>"
@@ -422,8 +442,20 @@ def _race_hero_html(race: Dict[str, Any]) -> str:
         if isinstance(need_to_clear, int)
         else str(story.get("next_gap_text") or "Next target n/a")
     )
+    chip_rank = html_escape(str(story.get("rank_text") or ("Rank #" + str(user_rank or "n/a"))), quote=False)
+    chip_tied = html_escape(str(story.get("headline") or "Race live"), quote=False)
+    chip_need = html_escape(
+        f"Need +{need_to_clear}" if isinstance(need_to_clear, int) else str(story.get("next_gap_text") or "Need n/a"),
+        quote=False,
+    )
+    chip_gap_two = html_escape(str(story.get("next_gap_text") or "Gap to #2 n/a"), quote=False)
+    chip_gap_one = html_escape(str(story.get("gap_to_one_text") or "Gap to #1 n/a"), quote=False)
     return f"""
     <section class="race-hero card" aria-label="Live Email Game race visualization">
+      <div class="race-hero__title-strip">
+        <span class="race-hero__kicker">Email Race Control</span>
+        <h1>Live Email Pod Race</h1>
+      </div>
       <div class="race-hero__canvas-wrap">
         <div class="race-hero__canvas" id="race-canvas" aria-hidden="true">
           <div class="race-arena">
@@ -435,41 +467,45 @@ def _race_hero_html(race: Dict[str, Any]) -> str:
             </div>
           </div>
         </div>
-        <div class="race-hero__overlay">
-          <div class="race-hero__title">
-            <span class="race-hero__kicker">Email Race Control</span>
-            <h1>Live Email Pod Race</h1>
+        <div class="race-chipbar" aria-label="Compact race state">
+          <span class="race-chip">{chip_rank}</span>
+          <span class="race-chip">{chip_tied}</span>
+          <span class="race-chip is-hot">{chip_need}</span>
+          <span class="race-chip">{chip_gap_two}</span>
+          <span class="race-chip">{chip_gap_one}</span>
+        </div>
+        <div class="race-boost-trail" aria-hidden="true"></div>
+        <div class="race-ticker"><span>{html_escape(str(ticker), quote=False)}</span></div>
+      </div>
+      <div class="race-hero__details">
+        <div class="race-state-banner">
+          <span>Race State</span>
+          <strong>{html_escape(str(story.get('headline') or 'Race live').upper(), quote=False)} - {html_escape(target_name, quote=False)}</strong>
+          <em>{html_escape(banner_action, quote=False)}</em>
+        </div>
+        <div class="race-story">
+          <div class="race-story__headline">{html_escape(str(story.get('headline') or 'Race live'), quote=False)}</div>
+          <div class="race-story__grid">
+            <span>{html_escape(str(story.get('rank_text') or ('Rank #' + str(user_rank or 'n/a'))), quote=False)}</span>
+            <span>Score {html_escape(str(user_score if user_score is not None else 'n/a'), quote=False)}</span>
+            <span>{html_escape(str(story.get('next_gap_text') or 'Next target n/a'), quote=False)}</span>
+            <span>{html_escape(str(story.get('gap_to_one_text') or 'Gap to #1 n/a'), quote=False)}</span>
+            <span>{html_escape(str(story.get('buffer_text') or 'Buffer n/a'), quote=False)}</span>
           </div>
-          <div class="race-state-banner">
-            <span>Race State</span>
-            <strong>{html_escape(str(story.get('headline') or 'Race live').upper(), quote=False)} - {html_escape(target_name, quote=False)}</strong>
-            <em>{html_escape(banner_action, quote=False)}</em>
-          </div>
-          <div class="race-story">
-            <div class="race-story__headline">{html_escape(str(story.get('headline') or 'Race live'), quote=False)}</div>
-            <div class="race-story__grid">
-              <span>{html_escape(str(story.get('rank_text') or ('Rank #' + str(user_rank or 'n/a'))), quote=False)}</span>
-              <span>Score {html_escape(str(user_score if user_score is not None else 'n/a'), quote=False)}</span>
-              <span>{html_escape(str(story.get('next_gap_text') or 'Next target n/a'), quote=False)}</span>
-              <span>{html_escape(str(story.get('gap_to_one_text') or 'Gap to #1 n/a'), quote=False)}</span>
-              <span>{html_escape(str(story.get('buffer_text') or 'Buffer n/a'), quote=False)}</span>
-            </div>
-          </div>
-          <div class="race-badges">
-            <span class="chip race-callout" id="race-callout">{html_escape(str(callout), quote=False)}</span>
-            {event_chips}
-          </div>
-          <div class="race-user-pill">
-            <span class="race-user-pill__label">YOU *</span>
-            <span class="race-user-pill__name">letlhogonolo_fanampe</span>
-            <span class="race-user-pill__phase">{html_escape(str(phase), quote=False)}</span>
-          </div>
-          <div class="race-hero__strip">
-            <ul class="racers-list" id="racers-list">
-              {''.join(rows) if rows else '<li class="racers-list__item"><span class="racers-list__rank">#1</span><span class="racers-list__marker">LIVE</span><span class="racers-list__name">Waiting for leaderboard data</span><span class="racers-list__score">n/a</span></li>'}
-            </ul>
-          </div>
-          <div class="race-ticker"><span>{html_escape(str(ticker), quote=False)}</span></div>
+        </div>
+        <div class="race-badges">
+          <span class="chip race-callout" id="race-callout">{html_escape(str(callout), quote=False)}</span>
+          {event_chips}
+        </div>
+        <div class="race-user-pill">
+          <span class="race-user-pill__label">YOU *</span>
+          <span class="race-user-pill__name">letlhogonolo_fanampe</span>
+          <span class="race-user-pill__phase">{html_escape(str(phase), quote=False)}</span>
+        </div>
+        <div class="race-hero__strip">
+          <ul class="racers-list" id="racers-list">
+            {''.join(rows) if rows else '<li class="racers-list__item"><span class="racers-list__rank">#1</span><span class="racers-list__marker">LIVE</span><span class="racers-list__name">Waiting for leaderboard data</span><span class="racers-list__score">n/a</span></li>'}
+          </ul>
         </div>
       </div>
     </section>
@@ -1035,9 +1071,25 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       overflow: hidden;
       margin-bottom: 16px;
     }}
+    .race-hero__title-strip {{
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 12px;
+      padding: 14px 18px 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      background: rgba(5, 12, 22, 0.72);
+    }}
+    .race-hero__title-strip h1 {{
+      margin: 0;
+      font-size: clamp(18px, 4vw, 34px);
+      line-height: 0.95;
+      letter-spacing: -0.04em;
+      text-align: right;
+    }}
     .race-hero__canvas-wrap {{
       position: relative;
-      min-height: clamp(460px, 62vh, 720px);
+      min-height: clamp(360px, 48vh, 520px);
       background:
         linear-gradient(rgba(102, 217, 255, 0.08) 1px, transparent 1px),
         linear-gradient(90deg, rgba(102, 217, 255, 0.08) 1px, transparent 1px),
@@ -1051,7 +1103,7 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       inset: 0;
       width: 100%;
       height: 100%;
-      min-height: clamp(460px, 62vh, 720px);
+      min-height: clamp(360px, 48vh, 520px);
     }}
     .race-arena {{
       position: absolute;
@@ -1076,10 +1128,10 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     .race-arena__track {{
       position: absolute;
       left: 50%;
-      top: 49%;
-      width: min(84vw, 700px);
-      height: min(46vw, 340px);
-      min-height: 210px;
+      top: 50%;
+      width: min(88vw, 760px);
+      height: min(48vw, 380px);
+      min-height: 260px;
       transform: translate(-50%, -50%);
       border: 2px solid rgba(102,217,255,0.58);
       border-radius: 50%;
@@ -1091,10 +1143,10 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     .race-arena__inner {{
       position: absolute;
       left: 50%;
-      top: 49%;
-      width: min(52vw, 430px);
-      height: min(28vw, 210px);
-      min-height: 120px;
+      top: 50%;
+      width: min(56vw, 480px);
+      height: min(30vw, 240px);
+      min-height: 150px;
       transform: translate(-50%, -50%);
       border: 1px solid rgba(125,255,178,0.24);
       border-radius: 50%;
@@ -1102,17 +1154,13 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     }}
     .race-arena__pods {{
       position: absolute;
-      left: 50%;
-      top: 49%;
-      width: min(84vw, 700px);
-      height: min(46vw, 340px);
-      min-height: 210px;
-      transform: translate(-50%, -50%);
+      inset: 0;
+      z-index: 3;
     }}
     .track-pod {{
       position: absolute;
-      left: 50%;
-      top: 50%;
+      left: var(--pod-x, 50%);
+      top: var(--pod-y, 50%);
       width: 92px;
       min-height: 58px;
       display: grid;
@@ -1124,20 +1172,50 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       border-radius: 8px;
       background: rgba(6,14,25,0.76);
       box-shadow: 0 0 20px rgba(102,217,255,0.14);
-      animation: podOrbit 15s linear infinite, podHover 1.9s ease-in-out infinite;
-      animation-delay: calc(var(--pod-index) * -2.8s), calc(var(--pod-index) * -0.25s);
+      animation: podHover 1.9s ease-in-out infinite;
+      animation-delay: calc(var(--pod-index) * -0.25s);
       transform-origin: center;
+      transform: translate(-50%, -50%);
+    }}
+    .track-pod::after {{
+      content: "";
+      position: absolute;
+      right: 78%;
+      top: 50%;
+      width: 58px;
+      height: 8px;
+      transform: translateY(-50%);
+      border-radius: 999px;
+      background: linear-gradient(90deg, transparent, rgba(102,217,255,0.4));
+      filter: blur(1px);
+      opacity: 0.7;
+      z-index: -1;
     }}
     .track-pod.is-user {{
-      width: 110px;
+      width: 132px;
+      min-height: 68px;
       border-color: rgba(125,255,178,0.86);
       background: rgba(9, 38, 31, 0.86);
       box-shadow: 0 0 0 2px rgba(125,255,178,0.22), 0 0 44px rgba(125,255,178,0.55);
-      z-index: 3;
-      animation-duration: 12s, 1.35s;
+      z-index: 5;
+      animation-duration: 1.35s;
+    }}
+    .track-pod.is-user::after {{
+      width: 86px;
+      height: 12px;
+      background: linear-gradient(90deg, transparent, rgba(125,255,178,0.72));
     }}
     .track-pod.is-bot {{
       border-color: rgba(102,217,255,0.44);
+    }}
+    .track-pod.is-leader {{
+      border-color: rgba(255,209,102,0.5);
+    }}
+    .track-pod.is-target {{
+      border-color: rgba(125,255,178,0.48);
+    }}
+    .track-pod.is-chaser {{
+      opacity: 0.92;
     }}
     .track-pod__body {{
       width: 28px;
@@ -1174,6 +1252,57 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       font-size: 10px;
       font-variant-numeric: tabular-nums;
     }}
+    .race-chipbar {{
+      position: absolute;
+      z-index: 6;
+      left: 12px;
+      right: 12px;
+      top: 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      pointer-events: none;
+    }}
+    .race-chip {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 6px 9px;
+      border-radius: 999px;
+      border: 1px solid rgba(102,217,255,0.22);
+      background: rgba(5, 13, 24, 0.68);
+      color: rgba(237,244,255,0.86);
+      font-size: 11px;
+      font-weight: 900;
+      font-variant-numeric: tabular-nums;
+      box-shadow: 0 10px 28px rgba(0,0,0,0.2);
+    }}
+    .race-chip.is-hot {{
+      border-color: rgba(125,255,178,0.6);
+      background: rgba(18, 61, 44, 0.78);
+      color: #dfffe9;
+      animation: calloutPulse 1.6s ease-in-out infinite;
+    }}
+    .race-boost-trail {{
+      position: absolute;
+      z-index: 2;
+      left: 14%;
+      right: 14%;
+      top: 56%;
+      height: 3px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, transparent, rgba(125,255,178,0.74), rgba(102,217,255,0.54), transparent);
+      filter: blur(0.5px);
+      animation: boostSweep 2.8s ease-in-out infinite;
+    }}
+    .race-hero__details {{
+      display: grid;
+      grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+      gap: 12px;
+      padding: 14px;
+      background: rgba(4, 10, 18, 0.74);
+      border-top: 1px solid rgba(255,255,255,0.08);
+    }}
     .race-hero__overlay {{
       position: relative;
       z-index: 2;
@@ -1200,7 +1329,7 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       font-weight: 800;
     }}
     .race-story {{
-      width: min(100%, 540px);
+      width: 100%;
       padding: 14px;
       border: 1px solid rgba(125, 255, 178, 0.24);
       border-radius: 8px;
@@ -1209,7 +1338,7 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     }}
     .race-story__headline {{
       color: var(--accent-2);
-      font-size: clamp(22px, 5vw, 44px);
+      font-size: clamp(18px, 3vw, 30px);
       font-weight: 900;
       line-height: 1;
       letter-spacing: 0;
@@ -1230,7 +1359,7 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     .race-state-banner {{
       display: grid;
       gap: 3px;
-      width: min(100%, 620px);
+      width: 100%;
       padding: 10px 12px;
       border-radius: 8px;
       border: 1px solid rgba(255,209,102,0.3);
@@ -1259,6 +1388,7 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       flex-wrap: wrap;
       gap: 8px;
       align-items: center;
+      align-content: start;
     }}
     .race-callout {{
       background: rgba(102, 217, 255, 0.12);
@@ -1311,8 +1441,7 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       font-size: 12px;
     }}
     .race-hero__strip {{
-      align-self: end;
-      margin-top: auto;
+      grid-column: 1 / -1;
       padding: 10px;
       border-radius: 8px;
       border: 1px solid rgba(255,255,255,0.09);
@@ -1377,11 +1506,15 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       font-weight: 800;
     }}
     .race-ticker {{
-      align-self: end;
-      width: 100%;
+      position: absolute;
+      z-index: 6;
+      left: 0;
+      right: 0;
+      bottom: 0;
       overflow: hidden;
-      border-top: 1px solid rgba(255,255,255,0.1);
-      padding-top: 9px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      padding: 8px 12px;
+      background: rgba(4, 10, 18, 0.58);
       color: rgba(237, 244, 255, 0.78);
       font-size: 12px;
       font-weight: 800;
@@ -1448,6 +1581,10 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     @keyframes gridDrift {{
       0% {{ background-position: 0 0, 0 0; }}
       100% {{ background-position: 0 36px, 36px 0; }}
+    }}
+    @keyframes boostSweep {{
+      0%, 100% {{ opacity: 0.28; transform: translateX(-8%) scaleX(0.82); }}
+      50% {{ opacity: 0.85; transform: translateX(8%) scaleX(1.08); }}
     }}
     @keyframes podOrbit {{
       0% {{ transform: translate(-50%, -50%) rotate(calc(var(--pod-index) * 72deg)) translateX(min(39vw, 330px)) rotate(calc(var(--pod-index) * -72deg)); }}
@@ -1622,7 +1759,8 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
     }}
     @media (max-width: 920px) {{
       .hero, .grid, .two-col, .stat-grid {{ grid-template-columns: 1fr; }}
-      .race-hero__canvas-wrap, .race-hero__overlay, .race-hero__canvas {{ min-height: 58vh; }}
+      .race-hero__canvas-wrap, .race-hero__canvas {{ min-height: 440px; }}
+      .race-hero__details {{ grid-template-columns: 1fr; }}
       .race-hero__overlay {{
         padding: 16px;
       }}
@@ -1644,28 +1782,49 @@ def _html_page(summary: Dict[str, Any], public_url: str) -> str:
       .button-row {{
         align-items: stretch;
       }}
-      .race-hero__canvas-wrap, .race-hero__overlay, .race-hero__canvas {{
-        min-height: 64vh;
+      .race-hero__title-strip {{
+        align-items: start;
+        padding: 12px 14px 9px;
       }}
-      .race-arena__pods, .race-arena__track {{
-        width: min(118vw, 460px);
-        height: 300px;
+      .race-hero__title-strip h1 {{
+        max-width: 11ch;
+      }}
+      .race-hero__canvas-wrap, .race-hero__canvas {{
+        min-height: 430px;
+      }}
+      .race-arena__track {{
+        width: min(118vw, 470px);
+        height: 310px;
       }}
       .race-arena__inner {{
         width: min(72vw, 280px);
         height: 170px;
       }}
       .track-pod {{
-        width: 78px;
-        min-height: 52px;
+        width: 76px;
+        min-height: 50px;
         padding: 6px;
       }}
       .track-pod.is-user {{
-        width: 94px;
+        width: 112px;
+        min-height: 62px;
       }}
-      @keyframes podOrbit {{
-        0% {{ transform: translate(-50%, -50%) rotate(calc(var(--pod-index) * 72deg)) translateX(190px) rotate(calc(var(--pod-index) * -72deg)); }}
-        100% {{ transform: translate(-50%, -50%) rotate(calc(360deg + var(--pod-index) * 72deg)) translateX(190px) rotate(calc(-360deg - var(--pod-index) * 72deg)); }}
+      .track-pod__label {{
+        font-size: 10px;
+      }}
+      .track-pod__score {{
+        font-size: 9px;
+      }}
+      .race-chipbar {{
+        top: 10px;
+        left: 10px;
+        right: 10px;
+        gap: 6px;
+      }}
+      .race-chip {{
+        min-height: 25px;
+        padding: 5px 8px;
+        font-size: 10px;
       }}
       .race-story {{
         padding: 12px;
