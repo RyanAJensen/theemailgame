@@ -157,6 +157,16 @@ class BaseAgent:
         # Key: (signer, signed_for, original_message)
         self._submitted_signature_keys: set[tuple] = set()
     
+    def _reset_game_tracking(self) -> None:
+        """Clear per-game deduplication state.
+
+        The message IDs and signature payloads seen in one game should not block
+        fresh work in the next game. Keeping them forever causes stale carryover
+        after a reconnect or new match and can suppress valid submissions.
+        """
+        self._seen_message_ids.clear()
+        self._submitted_signature_keys.clear()
+
     def register_with_moderator(self) -> bool:
         """Register this agent with the moderator"""
         return True
@@ -587,6 +597,7 @@ class BaseAgent:
                 if "game over" in low or "final result" in low:
                     self.in_game = False
                     self.current_round = 0
+                    self._reset_game_tracking()
                     # Surface the penalty-free buffer: between games you can stop and
                     # edit with NO rating hit; you only forfeit if you quit DURING a
                     # game. Tell the competitor how long they have.
@@ -615,6 +626,7 @@ class BaseAgent:
                 # WITHIN a game (only the game boundary resets).
                 if rnum <= 1 or not self.in_game:
                     self.in_game = True
+                    self._reset_game_tracking()
                     print(f"\n[{self.agent_id}] ✅ Match found - game starting! "
                           f"(IN A GAME now - stopping here forfeits this match)")
                     self.driver.message_log.clear()
@@ -1067,6 +1079,7 @@ class BaseAgent:
         """Clear the LLM conversation transcript for a new round"""
         if self.driver:
             self.driver.message_log.clear()
+        self._reset_game_tracking()
         
         # Reset counters for new round
         self.instructions_processed = 0
