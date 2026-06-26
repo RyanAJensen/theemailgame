@@ -523,6 +523,8 @@ class MonitorState:
     telegram_offset: int = 0
     phase: str = "unknown"
     last_event: str = ""
+    heartbeat_at: str = ""
+    status_snapshot: Dict[str, object] = field(default_factory=dict)
     connected_sent_pid: Optional[int] = None
     connected_sent_at: str = ""
     observed_lines: List[Dict[str, str]] = field(default_factory=list)
@@ -546,11 +548,16 @@ class MonitorState:
                 response = str(item.get("response") or "").strip()
                 if ts and command:
                     telegram_commands.append({"ts": ts, "command": command, "response": response})
+        status_snapshot = raw.get("status_snapshot")
+        if not isinstance(status_snapshot, dict):
+            status_snapshot = {}
         return cls(
             log_offset=int(raw.get("log_offset") or 0),
             telegram_offset=int(raw.get("telegram_offset") or 0),
             phase=str(raw.get("phase") or "unknown"),
             last_event=str(raw.get("last_event") or ""),
+            heartbeat_at=str(raw.get("heartbeat_at") or ""),
+            status_snapshot=status_snapshot,
             connected_sent_pid=int(raw.get("connected_sent_pid") or 0) or None,
             connected_sent_at=str(raw.get("connected_sent_at") or ""),
             observed_lines=observed_lines,
@@ -567,6 +574,8 @@ class MonitorState:
                 "telegram_offset": self.telegram_offset,
                 "phase": self.phase,
                 "last_event": self.last_event,
+                "heartbeat_at": self.heartbeat_at,
+                "status_snapshot": self.status_snapshot,
                 "connected_sent_pid": self.connected_sent_pid,
                 "connected_sent_at": self.connected_sent_at,
                 "observed_lines": observed_lines[-MAX_OBSERVED_LINES:],
@@ -834,6 +843,8 @@ class EmailGameMonitor:
             return
         self._last_heartbeat_monotonic = now
         self.state.phase = self._derive_phase()
+        self.state.heartbeat_at = _now_sast().isoformat()
+        self.state.status_snapshot = self._build_status_snapshot()
         self._persist_state()
         print(
             "[monitor] heartbeat "
@@ -851,6 +862,21 @@ class EmailGameMonitor:
         except ValueError:
             return DEFAULT_LEADERBOARD_POLL_SECONDS
         return max(1, value)
+
+    def _build_status_snapshot(self) -> Dict[str, object]:
+        phase = self._derive_phase()
+        return {
+            "at": _now_sast().isoformat(),
+            "phase": phase,
+            "in_game": phase == "in game",
+            "waiting": phase in {"waiting", "between matches"},
+            "agent_running": self._agent_process_running(),
+            "match_active": self._match_active(),
+            "current_round": self._latest_round_number(),
+            "last_event": self.state.last_event,
+            "pipe_connected": _tmux_pane_pipe_connected(TMUX_SESSION_AGENT),
+            "log_file_age_seconds": self._log_file_age_seconds(),
+        }
 
     def _persist_state(self) -> None:
         with self._lock:
@@ -1192,7 +1218,12 @@ class EmailGameMonitor:
         pane_observed = bool(self._observed_lines)
         pane_fresh = bool(pane_observed and pane_age_seconds is not None and pane_age_seconds <= STALE_LOG_THRESHOLD_SEC)
         pane_quiescent_between = bool(pane_observed and self._pane_indicates_quiescent_between_matches())
-        stale = bool(file_stale and not pane_fresh and not pane_quiescent_between)
+        heartbeat_dt = _parse_sast(self.state.heartbeat_at)
+        heartbeat_age_seconds = max(0.0, (time.time() - heartbeat_dt.timestamp())) if heartbeat_dt is not None else None
+        heartbeat_fresh = bool(heartbeat_age_seconds is not None and heartbeat_age_seconds <= STALE_LOG_THRESHOLD_SEC)
+        phase = self._derive_phase()
+        quiet_phase = phase in {"waiting", "between matches"}
+        stale = bool(file_stale and not pane_fresh and not pane_quiescent_between and not heartbeat_fresh and not quiet_phase)
         return LogStreamStatus(
             exists=self.log_file.exists(),
             age_seconds=age_seconds,
@@ -1406,7 +1437,7 @@ class EmailGameMonitor:
         if command == "/help":
             return self._help_text()
         if command == "/codex_help":
-            return "Use @CodexBridgePapzinBot for Codex operator commands."
+            return "Use @CodexBridgePapzinBot for Codex bridge commands."
         if command == "/dashboard":
             dashboard_url, refreshed = self._dashboard_tunnel_url(force_refresh=False)
             return self._dashboard_text(url=dashboard_url, refreshed=refreshed)
@@ -1475,7 +1506,7 @@ class EmailGameMonitor:
             "/startagent — start if idle\n"
             "/restartagent — safe restart\n"
             "/stopagent — stop only if safe\n\n"
-            "Use @CodexBridgePapzinBot for Codex operator commands.\n\n"
+            "Use @CodexBridgePapzinBot for Codex bridge commands.\n\n"
             "<b>Monitoring</b>\n"
             "/logs — latest match summary\n"
             "/match — latest match only\n"
@@ -1487,7 +1518,7 @@ class EmailGameMonitor:
             "/rank — my rank and gaps\n"
             "/participants — leaderboard visibility\n"
             "/readiness — competition readiness report\n"
-            "/budget — LLM budget and remaining estimate\n"
+            "/budget — current spend and remaining budget\n"
             "/usage — recent LLM call usage\n"
             "/coach — concise performance analysis\n"
             "/recommend — next recommended Codex goal\n"
@@ -1602,7 +1633,9 @@ class EmailGameMonitor:
             )
         return (
             "🏁 <b>Email Game Race Control</b>\n\n"
-            f"Open dashboard:\n<code>{html_escape(url, quote=False)}</code>"
+            "Share this view-only dashboard link with Discord members:\n"
+            f"<code>{html_escape(url, quote=False)}</code>\n"
+            "\nAnyone with this link can only view the dashboard."
         )
 
     def _dashboard_qa_report_text(self) -> str:
@@ -1654,8 +1687,9 @@ class EmailGameMonitor:
         return (
             "🏁 <b>Email Game Race Control</b>\n\n"
             f"{lead}\n"
-            "Tap Open Race Control Dashboard.\n"
-            f"Open dashboard:\n<code>{html_escape(url, quote=False)}</code>"
+            "<b>Public dashboard link</b> — share this with others:\n"
+            f"<code>{html_escape(url, quote=False)}</code>\n"
+            "\nTap <b>Open Race Control Dashboard</b> below to open it now."
         )
 
     def _dashboard_reply_markup(self, url: str = "") -> Optional[Dict[str, object]]:
@@ -1837,6 +1871,24 @@ class EmailGameMonitor:
             if match:
                 return match.group(1)
         return "n/a"
+
+    def _monitor_snapshot(self) -> Dict[str, object]:
+        state = self.state
+        snapshot = state.status_snapshot if isinstance(state.status_snapshot, dict) else {}
+        if snapshot:
+            return snapshot
+        raw = _read_json(self.state_file)
+        if isinstance(raw, dict):
+            fallback = raw.get("status_snapshot")
+            if isinstance(fallback, dict) and fallback:
+                return fallback
+            return raw
+        return {}
+
+    def _monitor_phase(self) -> str:
+        snapshot = self._monitor_snapshot()
+        phase = str(snapshot.get("phase") or snapshot.get("state") or self.state.phase or "").strip().lower()
+        return phase.replace("_", " ")
 
     def _derive_phase(self) -> str:
         recent = self._structured_event_entries(MAX_STATUS_LINES) or self._recent_observed_entries(MAX_STATUS_LINES)
@@ -2064,34 +2116,42 @@ class EmailGameMonitor:
             warning_lines.append(
                 f"Reconnect error: <code>{html_escape(_clean_log_text(log_status.reconnect_error), quote=False)}</code>"
             )
+        heartbeat_dt = _parse_sast(self.state.heartbeat_at)
+        heartbeat_age = max(0.0, (now_sast - heartbeat_dt).total_seconds()) if heartbeat_dt is not None else None
+        snapshot = self._monitor_snapshot()
+        snapshot_phase = str(snapshot.get("phase") or snapshot.get("state") or phase or "n/a").strip().lower().replace("_", " ")
+        restart_gate = "blocked (in game)" if snapshot.get("in_game") or snapshot.get("match_active") else "open"
         lines = [
             "🎮 <b>Email Game Status</b>",
             "",
-            f"Process: {process_icon} <b>{'running' if agent_running else 'stopped'}</b>",
-            f"State: {state_icon} <b>{html_escape(state_label, quote=False)}</b>",
-            f"State source: <b>{html_escape(source, quote=False)}</b>",
-            f"Query time: <b>{html_escape(_format_sast(now_sast), quote=False)}</b>",
-            f"Log freshness: <b>{html_escape(self._format_age(log_status.age_seconds), quote=False)}</b>",
-            f"Log mtime: <b>{html_escape(self._log_file_mtime_text(), quote=False)}</b>",
-            f"Pane observed freshness: <b>{html_escape(self._format_age(log_status.pane_age_seconds), quote=False)}</b>",
-            f"Structured event freshness: <b>{html_escape(self._format_age(latest_event_age), quote=False)}</b>",
-            f"Last structured event: <b>{html_escape(_format_sast(latest_event.ts) if latest_event else 'n/a', quote=False)}</b>",
-            f"Last LLM call: <b>{html_escape(_format_sast(latest_llm_event.ts) if latest_llm_event else 'n/a', quote=False)}</b>",
-            f"Last completed match: <b>{html_escape(_format_sast(last_completed_match_time) if last_completed_match_time else 'n/a', quote=False)}</b>",
-            f"Pipe connected: <b>{html_escape(self._format_yes_no_unknown(pipe_connected), quote=False)}</b>",
-            f"Pipe reconnected: <b>{'yes' if log_status.reconnected else 'no'}</b>",
-            f"Pane: <code>{html_escape(pane_id, quote=False)}</code> / PID <code>{html_escape(str(pane_pid) if pane_pid else 'unknown', quote=False)}</code>",
-            f"Latest round: <b>{html_escape(round_text, quote=False)}</b>",
-            f"Last match log: <b>{html_escape(updated, quote=False)}</b>",
-            f"Latest match: <i>{html_escape(summary_line, quote=False)}</i>",
-            f"Reminder count: <b>{html_escape(str(reminder_count), quote=False)}</b>",
-            f"Branch: <code>{html_escape(branch, quote=False)}</code>",
-            f"Commit: <code>{html_escape(commit, quote=False)}</code>",
-            f"Monitor: {monitor_icon} running",
-            f"Last match log line: <i>{html_escape(_format_sast(latest_entry.ts if latest_entry else None), quote=False)} • {html_escape(_clean_log_text(latest_line), quote=False)}</i>",
+            f"• <b>Process</b>: {process_icon} <b>{'running' if agent_running else 'stopped'}</b>",
+            f"• <b>State</b>: {state_icon} <b>{html_escape(state_label, quote=False)}</b>",
+            f"• <b>State source</b>: <b>{html_escape(source, quote=False)}</b>",
+            f"• <b>Runtime snapshot phase</b>: <code>{html_escape(snapshot_phase, quote=False)}</code>",
+            f"• <b>Restart gate</b>: <b>{html_escape(restart_gate, quote=False)}</b>",
+            f"• <b>Query time</b>: <code>{html_escape(_format_sast(now_sast), quote=False)}</code>",
+            f"• <b>Log freshness</b>: <code>{html_escape(self._format_age(log_status.age_seconds), quote=False)}</code>",
+            f"• <b>Monitor heartbeat freshness</b>: <code>{html_escape(self._format_age(heartbeat_age), quote=False)}</code>",
+            f"• <b>Log mtime</b>: <code>{html_escape(self._log_file_mtime_text(), quote=False)}</code>",
+            f"• <b>Pane observed freshness</b>: <code>{html_escape(self._format_age(log_status.pane_age_seconds), quote=False)}</code>",
+            f"• <b>Structured event freshness</b>: <code>{html_escape(self._format_age(latest_event_age), quote=False)}</code>",
+            f"• <b>Last structured event</b>: <code>{html_escape(_format_sast(latest_event.ts) if latest_event else 'n/a', quote=False)}</code>",
+            f"• <b>Last LLM call</b>: <code>{html_escape(_format_sast(latest_llm_event.ts) if latest_llm_event else 'n/a', quote=False)}</code>",
+            f"• <b>Last completed match</b>: <code>{html_escape(_format_sast(last_completed_match_time) if last_completed_match_time else 'n/a', quote=False)}</code>",
+            f"• <b>Pipe connected</b>: <b>{html_escape(self._format_yes_no_unknown(pipe_connected), quote=False)}</b>",
+            f"• <b>Pipe reconnected</b>: <b>{'yes' if log_status.reconnected else 'no'}</b>",
+            f"• <b>Pane</b>: <code>{html_escape(pane_id, quote=False)}</code> / <b>PID</b> <code>{html_escape(str(pane_pid) if pane_pid else 'unknown', quote=False)}</code>",
+            f"• <b>Latest round</b>: <code>{html_escape(round_text, quote=False)}</code>",
+            f"• <b>Last match log</b>: <code>{html_escape(updated, quote=False)}</code>",
+            f"• <b>Latest match</b>: <i>{html_escape(summary_line, quote=False)}</i>",
+            f"• <b>Reminder count</b>: <code>{html_escape(str(reminder_count), quote=False)}</code>",
+            f"• <b>Branch</b>: <code>{html_escape(branch, quote=False)}</code>",
+            f"• <b>Commit</b>: <code>{html_escape(commit, quote=False)}</code>",
+            f"• <b>Monitor</b>: {monitor_icon} <b>running</b>",
+            f"• <b>Last match log line</b>: <i>{html_escape(_format_sast(latest_entry.ts if latest_entry else None), quote=False)} • {html_escape(_clean_log_text(latest_line), quote=False)}</i>",
         ]
         if warning_lines:
-            lines.extend(["", *warning_lines])
+            lines.extend(["", "⚠️ <b>Notes</b>", *[f"• {line}" for line in warning_lines]])
         return "\n".join(lines)
 
     def _match_active(self) -> bool:
@@ -2152,6 +2212,42 @@ class EmailGameMonitor:
         raw = str(entry.get("elo") or "").strip()
         return int(raw) if raw.lstrip("-").isdigit() else None
 
+    def _leaderboard_previous_score_map(self) -> Dict[str, int]:
+        snapshot = self.leaderboard_state.last_snapshot if isinstance(self.leaderboard_state.last_snapshot, dict) else {}
+        top5 = snapshot.get("top5") if isinstance(snapshot, dict) else None
+        if not isinstance(top5, list):
+            return {}
+        previous: Dict[str, int] = {}
+        for entry in top5:
+            if not isinstance(entry, dict):
+                continue
+            agent_id = str(entry.get("agent_id") or "").strip()
+            score = self._entry_score(entry)
+            if agent_id and score is not None:
+                previous[agent_id] = score
+        return previous
+
+    def _score_delta_text(self, delta: Optional[int]) -> str:
+        if delta is None:
+            return "n/a"
+        sign = "+" if delta >= 0 else ""
+        return f"{sign}{delta}"
+
+    def _leaderboard_score_text(
+        self,
+        entry: Dict[str, object],
+        previous_scores: Dict[str, int],
+    ) -> str:
+        score = self._entry_score(entry)
+        if score is None:
+            raw = str(entry.get("elo", "?"))
+            return raw
+        agent_id = str(entry.get("agent_id") or "").strip()
+        previous_score = previous_scores.get(agent_id)
+        if previous_score is None:
+            return str(score)
+        return f"{score} ({self._score_delta_text(score - previous_score)})"
+
     def _gap_to_next_visible_rank(self, entries: List[Dict[str, object]], me: Optional[Dict[str, object]]) -> str:
         my_rank = self._entry_rank(me)
         my_score = self._entry_score(me)
@@ -2180,6 +2276,7 @@ class EmailGameMonitor:
         full_requested = bool(args and args[0].lower() == "full")
         top = [entry for entry in entries[:5] if isinstance(entry, dict)]
         me = self._my_leaderboard_entry(entries)
+        previous_scores = self._leaderboard_previous_score_map()
         if full_requested:
             lines = ["🏆 <b>Testing Leaderboard Full</b>", "", f"Fetched: <b>{html_escape(_format_sast(), quote=False)}</b>", ""]
             if len(entries) <= 5:
@@ -2190,11 +2287,13 @@ class EmailGameMonitor:
             lines = ["🏆 <b>Testing Leaderboard</b>", "", f"Fetched: <b>{html_escape(_format_sast(), quote=False)}</b>", ""]
             display = top
 
+        lines.append("Δ shows score change since the previous leaderboard poll.")
+        lines.append("")
         for entry in display:
             rank = html_escape(str(entry.get("rank", "?")), quote=False)
             agent_id_raw = str(entry.get("agent_id", "unknown"))
             agent_id = html_escape(self._leaderboard_agent_label(agent_id_raw), quote=False)
-            score = html_escape(str(entry.get("elo", "?")), quote=False)
+            score = html_escape(self._leaderboard_score_text(entry, previous_scores), quote=False)
             if entry.get("agent_id") == self._agent_name:
                 lines.append(f"{rank}. <b>{agent_id} — {score}</b>")
             else:
@@ -2519,13 +2618,14 @@ class EmailGameMonitor:
         top5 = snapshot.get("top5")
         if not isinstance(top5, list):
             return ["Top 5: unavailable"]
+        previous_scores = self._leaderboard_previous_score_map()
         lines.append("Top 5:")
         for entry in top5:
             if not isinstance(entry, dict):
                 continue
             rank = entry.get("rank", "?")
             agent_id = self._leaderboard_agent_label(str(entry.get("agent_id") or "unknown"))
-            score = entry.get("elo", "?")
+            score = self._leaderboard_score_text(entry, previous_scores)
             lines.append(f"{rank}. {agent_id} — {score}")
         return lines
 
@@ -2636,6 +2736,15 @@ class EmailGameMonitor:
             return f"Preflight failed with exit code {result.returncode}."
         return f"Preflight failed with exit code {result.returncode}.\n{html_escape(_clean_log_text(output), quote=False)}"
 
+    def _restart_guard(self) -> Tuple[bool, str, str]:
+        snapshot = self._monitor_snapshot()
+        phase = self._monitor_phase()
+        if bool(snapshot.get("in_game")) or phase == "in game" or bool(snapshot.get("match_active")):
+            return False, phase, "Agent is IN GAME. I will not restart because it may forfeit the match."
+        if phase not in ("between matches", "disconnected", "crashed", "waiting"):
+            return False, phase, "Restart refused until the agent is between matches, waiting, disconnected, or crashed."
+        return True, phase, ""
+
     def _start_agent_text(self) -> str:
         if _process_running_pattern(r"scripts/run_custom_agent.py letlhogonolo_fanampe"):
             return "Agent already running."
@@ -2647,7 +2756,7 @@ class EmailGameMonitor:
         return f"Failed to start agent: {html_escape(_clean_log_text((result.stderr or result.stdout).strip() or 'unknown error'), quote=False)}"
 
     def _stop_agent_text(self) -> str:
-        phase = self._derive_phase()
+        phase = self._monitor_phase()
         if phase == "in game":
             return "Agent is IN GAME. I will not stop because it may forfeit the match."
         if not _process_running_pattern(r"scripts/run_custom_agent.py letlhogonolo_fanampe"):
@@ -2658,11 +2767,9 @@ class EmailGameMonitor:
         return f"Failed to stop agent: {html_escape(_clean_log_text((result.stderr or result.stdout).strip() or 'unknown error'), quote=False)}"
 
     def _restart_agent_text(self) -> str:
-        phase = self._derive_phase()
-        if phase == "in game":
-            return "Agent is IN GAME. I will not restart because it may forfeit the match."
-        if phase not in ("between matches", "disconnected", "crashed"):
-            return "Restart refused until the log shows Game over - between matches now, disconnected, or crashed."
+        allowed, phase, reason = self._restart_guard()
+        if not allowed:
+            return reason
         if not _process_running_pattern(r"scripts/run_custom_agent.py letlhogonolo_fanampe"):
             return self._start_agent_text()
         stop = _tmux_send_ctrl_c(TMUX_SESSION_AGENT)
@@ -3006,38 +3113,38 @@ class EmailGameMonitor:
         idle_note: bool = False,
     ) -> str:
         lines = [title, ""]
-        lines.append(f"Latest completed match: <b>{html_escape(_format_sast(summary.started_at), quote=False)}</b>")
+        lines.append(f"• <b>Latest completed match</b>: <code>{html_escape(_format_sast(summary.started_at), quote=False)}</code>")
         if idle_note:
-            lines.append("No newer match activity observed yet.")
-        lines.append(f"{_format_sast(summary.started_at)} • Match started")
+            lines.append("• No newer match activity observed yet.")
+        lines.append(f"• <b>Started</b>: <code>{_format_sast(summary.started_at)}</code>")
         lines.append("")
 
         rounds = self._sorted_round_summaries(summary)
         reminder_round_count = 0
         for round_id, round_summary in rounds.items():
             lines.append(f"<b>Round {html_escape(round_id, quote=False)}</b>")
-            lines.append(f"📨 We requested signatures from: {self._format_requested_agents(round_summary)}")
-            lines.append(f"📥 Requests received from: {self._format_agent_list(round_summary.received_from)}")
-            lines.append(f"✅ Signed replies received: {self._format_agent_list(round_summary.signed_from)}")
-            lines.append(f"📤 Submitted to moderator: {self._format_yes_no_unknown(round_summary.submitted)}")
+            lines.append(f"• 📨 <b>Requested signatures from</b>: {self._format_requested_agents(round_summary)}")
+            lines.append(f"• 📥 <b>Requests received from</b>: {self._format_agent_list(round_summary.received_from)}")
+            lines.append(f"• ✅ <b>Signed replies received</b>: {self._format_agent_list(round_summary.signed_from)}")
+            lines.append(f"• 📤 <b>Submitted to moderator</b>: {self._format_yes_no_unknown(round_summary.submitted)}")
             if compact_reminders:
                 if round_summary.reminders > 0:
                     reminder_round_count += 1
             else:
-                lines.append(f"⚠️ Reminder: {'yes' if round_summary.reminders > 0 else 'no'}")
+                lines.append(f"• ⚠️ <b>Reminder</b>: {'yes' if round_summary.reminders > 0 else 'no'}")
             lines.append("")
 
         if compact_reminders:
             if reminder_round_count > 0:
-                lines.append(f"⚠️ Action reminders: {reminder_round_count} recent rounds")
+                lines.append(f"• ⚠️ <b>Action reminders</b>: {reminder_round_count} recent rounds")
             else:
-                lines.append("⚠️ Action reminders: none observed")
-        lines.append("🏁 Game ended" if summary.ended else "🏁 Game in progress")
+                lines.append("• ⚠️ <b>Action reminders</b>: none observed")
+        lines.append("🏁 <b>Game ended</b>" if summary.ended else "🏁 <b>Game in progress</b>")
         if include_note:
             lines.extend(
                 [
                     "",
-                    "Note: house_bot_* are built-in competition bots/opponents.",
+                    "• Note: house_bot_* are built-in competition bots/opponents.",
                 ]
             )
         return "\n".join(lines)
