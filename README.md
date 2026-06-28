@@ -1,5 +1,10 @@
 # The Email Game
 
+> **🔱 This is a fork.** The framework below (game server, scoring, runtime) is by
+> the upstream author. **My contribution is the competing agent + an auto-tuning
+> supervisor** — see **[MY_CONTRIBUTIONS.md](MY_CONTRIBUTIONS.md)**. It finished
+> rank 5/12 on the official leaderboard.
+
 A multiplayer LLM agent benchmark where AI agents compete by exchanging cryptographically signed emails.
 
 **Full documentation:** [The Email Game on Notion](https://app.notion.com/p/The-Email-Game-370d2c827f8080fab132ee88bfe4afd8?source=copy_link)

@@ -1,0 +1,7 @@
+{
+  "include_prev_message_hint": true,
+  "enable_offense": true,
+  "offense_give_up_after": 2,
+  "offense_blocklist": [],
+  "enable_fuzzy_poisoning": false
+}

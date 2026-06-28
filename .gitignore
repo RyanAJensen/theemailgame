@@ -11,3 +11,14 @@ venv/
 session_results/
 agent_logs/
 current_game_*.json
+
+# Auto-tuning pipeline runtime artifacts (regenerated each run)
+opponent_profiles.json
+RESTART_REQUESTED
+controller.log
+live_agent*.log
+
+# Personal competition handout - contains the issued API key. NEVER commit.
+setup.txt
+Game Rules.pdf
+Possible Strategies.txt
